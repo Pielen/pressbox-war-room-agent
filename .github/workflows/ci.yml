@@ -1,0 +1,42 @@
+name: PressBox War Room CI (Lint, Unit Tests & ADK Eval)
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-unit-tests:
+    name: Ruff Lint & Pytest / Unittest Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install package and dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Ruff code quality & style checks
+        run: |
+          ruff check pressbox_war_room tests
+
+      - name: Run Unit Test & ADK EvalSet Schema Verification Suite
+        env:
+          WAR_ROOM_OFFLINE_FALLBACK: "TRUE"
+        run: |
+          pytest tests/unit -v --cov=pressbox_war_room --cov-report=term-missing

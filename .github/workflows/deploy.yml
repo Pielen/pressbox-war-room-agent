@@ -1,0 +1,46 @@
+name: Deploy PressBox War Room to Cloud Run / Vertex AI Agent Engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target GCP Environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Build Container & Deploy to Google Cloud Run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        if: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Build & Push Container Image to Artifact Registry
+        if: ${{ vars.GCP_PROJECT_ID != '' }}
+        run: |
+          gcloud builds submit --tag "${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/pressbox-war-room/agent:${{ github.sha }}"
+
+      - name: Deploy ADK API Server to Google Cloud Run
+        if: ${{ vars.GCP_PROJECT_ID != '' }}
+        run: |
+          gcloud run deploy pressbox-war-room-agent \
+            --image "${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/pressbox-war-room/agent:${{ github.sha }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --platform managed \
+            --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }},GOOGLE_CLOUD_LOCATION=${{ vars.GCP_REGION }},WAR_ROOM_ENABLE_CLOUD_TRACE=TRUE"

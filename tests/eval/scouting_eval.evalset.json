@@ -1,0 +1,155 @@
+{
+  "eval_set_id": "pressbox_war_room_scouting_evalset",
+  "name": "PressBox War Room Multi-Agent MLB & NHL Evaluation Suite",
+  "description": "End-to-end trajectory and response accuracy evaluation cases for MLB scouting, NHL special teams analysis, quantitative matchup edges, and session watchlist memory.",
+  "eval_cases": [
+    {
+      "eval_id": "mlb_yankees_dodgers_matchup_dossier",
+      "conversation": [
+        {
+          "invocation_id": "eval-mlb-001",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Give me an MLB scouting matchup breakdown for the Los Angeles Dodgers (LAD) at the New York Yankees (NYY), including probable starters, platoon splits, and the Pythagorean/Log5 win probability edge."
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "The New York Yankees (NYY, 94-68) host the Los Angeles Dodgers (LAD, 98-64) in a premier interleague matchup featuring Gerrit Cole (3.18 ERA, 1.09 WHIP) against Yoshinobu Yamamoto (3.00 ERA, 1.11 WHIP). Using Pythagorean expectancy (1.83 exponent) and Log5 with home-field adjustment, NYY holds a 50.65% win probability vs LAD's 49.35%."
+              }
+            ],
+            "role": "model"
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_mlb_schedule_and_probables",
+                "args": {
+                  "team_code": "NYY",
+                  "opponent_code": "LAD"
+                }
+              },
+              {
+                "name": "get_mlb_team_and_pitcher_splits",
+                "args": {
+                  "team_code": "NYY",
+                  "opponent_code": "LAD"
+                }
+              },
+              {
+                "name": "calculate_advanced_matchup_edge",
+                "args": {
+                  "sport": "MLB",
+                  "home_team": "NYY",
+                  "away_team": "LAD"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "pressbox_war_room",
+        "user_id": "eval_analyst",
+        "state": {
+          "user:watchlist_mlb": ["NYY", "LAD"],
+          "user:watchlist_nhl": ["BOS", "TOR"]
+        }
+      }
+    },
+    {
+      "eval_id": "nhl_bruins_leafs_special_teams_and_goalie_edge",
+      "conversation": [
+        {
+          "invocation_id": "eval-nhl-001",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Compare the NHL special teams (PP% and PK%) and starting goalies for the Toronto Maple Leafs (TOR) at the Boston Bruins (BOS), and calculate the hockey matchup win probability."
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "Boston (BOS) posts a 104.7% Net Special Teams Index (22.2% PP, 82.5% PK) and starts Jeremy Swayman (.916 SV%, 2.53 GAA, +18.4 GSAx) against Toronto's (TOR) 100.9% Net Special Teams Index (24.0% PP, 76.9% PK) and Joseph Woll (.907 SV%, +6.2 GSAx). Boston holds a +3.8% special teams index edge, +12.2 GSAx goaltending advantage, and a 55.34% home-ice Log5 win probability."
+              }
+            ],
+            "role": "model"
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_nhl_team_special_teams_and_goalies",
+                "args": {
+                  "team_code": "BOS",
+                  "opponent_code": "TOR"
+                }
+              },
+              {
+                "name": "calculate_advanced_matchup_edge",
+                "args": {
+                  "sport": "NHL",
+                  "home_team": "BOS",
+                  "away_team": "TOR"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "pressbox_war_room",
+        "user_id": "eval_analyst",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "memory_watchlist_persistence",
+      "conversation": [
+        {
+          "invocation_id": "eval-mem-001",
+          "user_content": {
+            "parts": [
+              {
+                "text": "Add the Edmonton Oilers (EDM) to my NHL scouting watchlist with the note 'Track Connor McDavid 5v5 xGF% and power play entries'."
+              }
+            ],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "Added EDM to your NHL scouting watchlist and saved your analyst scouting note regarding Connor McDavid's 5v5 xGF% and power play entries."
+              }
+            ],
+            "role": "model"
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "manage_scouting_watchlist",
+                "args": {
+                  "action": "add",
+                  "sport": "NHL",
+                  "team_or_player": "EDM",
+                  "scouting_note": "Track Connor McDavid 5v5 xGF% and power play entries"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "pressbox_war_room",
+        "user_id": "eval_analyst",
+        "state": {}
+      }
+    }
+  ]
+}
