@@ -1,34 +1,51 @@
-"""Root Agent (`WarRoomCoordinator`), ADK App (`EventsCompactionConfig`), and Persistent Runner Factory.
+"""Root Agent (`WarRoomCoordinator`), ADK App with `EventsCompactionConfig`, and Persistent Runner Factory.
 
-Exposes `root_agent` and `app` as canonical Google ADK entry points (`adk web`,
-`adk run`, `adk api_server`, and `AgentEvaluator`), backed by `DatabaseSessionService`,
-`PersistentScoutingDatabase`, `EventsCompactionConfig`, and `AsyncBackgroundMemoryManager`.
+Exposes `root_agent` and `app` as canonical Google ADK entry points (`adk web`, `adk run`,
+`adk api_server`, and `AgentEvaluator`), wired with:
+- Persistent SQLite / SQL database (`DatabaseSessionService` + `SQLiteScoutingMemoryDatabase`)
+- Sliding-window conversation history compaction (`EventsCompactionConfig` + `ConversationHistoryCompactor`)
+- Non-blocking background memory execution (`AsyncBackgroundMemoryManager`)
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 try:
     from google.adk.agents import LlmAgent  # type: ignore[import-untyped]
+    from google.adk.apps.app import App  # type: ignore[import-untyped]
     from google.adk.memory import InMemoryMemoryService  # type: ignore[import-untyped]
     from google.adk.runners import Runner  # type: ignore[import-untyped]
-    from google.adk.sessions import (  # type: ignore[import-untyped]
-        DatabaseSessionService,
-        InMemorySessionService,
-    )
-    from pressbox_war_room._adk_compat import App, EventsCompactionConfig
 except ImportError:
     from pressbox_war_room._adk_compat import (
-        App,
-        DatabaseSessionService,
-        EventsCompactionConfig,
         InMemoryMemoryService,
-        InMemorySessionService,
         LlmAgent,
         Runner,
     )
 
+    class App:  # type: ignore[no-redef]
+        """Compatible ADK App wrapper binding root_agent and events_compaction_config."""
+
+        def __init__(
+            self,
+            name: str,
+            root_agent: Any,
+            events_compaction_config: Any = None,
+        ) -> None:
+            self.name = name
+            self.root_agent = root_agent
+            self.events_compaction_config = events_compaction_config
+
+
 from pressbox_war_room.config import settings
-from pressbox_war_room.memory.background_worker import background_memory_manager
+from pressbox_war_room.memory import (
+    DEFAULT_DATABASE_URL,
+    DEFAULT_EVENTS_COMPACTION_CONFIG,
+    background_memory_manager,
+    create_persistent_adk_session_service,
+    history_compactor,
+    persistent_memory_db,
+)
 from pressbox_war_room.observability.callbacks import (
     after_agent_callback,
     after_model_callback,
@@ -60,9 +77,9 @@ root_agent = LlmAgent(
     description=(
         "Root coordinator for the PressBox War Room multi-agent MLB & NHL scouting "
         "and tactical matchup analytics system. Routes queries to specialist MLB/NHL "
-        "scout sub-agents, manages persistent SQLite scouting watchlists with async "
-        "background tasks and history compaction, and orchestrates the parallel-gather "
-        "+ critic-verified dossier pipeline."
+        "scout sub-agents, manages persistent scouting watchlists in SQLite & session memory "
+        "via non-blocking background tasks, compacts long conversation history, and "
+        "orchestrates the parallel-gather + critic-verified dossier pipeline."
     ),
     instruction=WAR_ROOM_COORDINATOR_INSTRUCTION,
     tools=[
@@ -88,30 +105,18 @@ root_agent = LlmAgent(
     after_tool_callback=after_tool_callback,
 )
 
-events_compaction_config = EventsCompactionConfig(
-    compaction_interval=settings.compaction_interval,
-    overlap_size=settings.compaction_overlap_size,
-)
-
 app = App(
     name=settings.app_name,
     root_agent=root_agent,
-    events_compaction_config=events_compaction_config,
+    events_compaction_config=DEFAULT_EVENTS_COMPACTION_CONFIG,
 )
 
 
 def create_war_room_runner(
-    db_url: str | None = None,
-) -> tuple[Runner, DatabaseSessionService | InMemorySessionService, InMemoryMemoryService]:
-    """Creates an ADK Runner backed by `DatabaseSessionService` (SQLite/SQL) and `PersistentScoutingDatabase`."""
-    resolved_db_url = db_url or settings.database_url
-    try:
-        session_service: DatabaseSessionService | InMemorySessionService = (
-            DatabaseSessionService(db_url=resolved_db_url)
-        )
-    except Exception:  # noqa: BLE001
-        session_service = InMemorySessionService()
-
+    db_url: str = DEFAULT_DATABASE_URL,
+) -> tuple[Runner, Any, InMemoryMemoryService]:
+    """Creates an ADK Runner backed by `DatabaseSessionService` (SQLite/PostgreSQL) and MemoryService."""
+    session_service = create_persistent_adk_session_service(db_url=db_url)
     memory_service = InMemoryMemoryService()
     runner = Runner(
         agent=root_agent,
@@ -126,6 +131,7 @@ __all__ = [
     "app",
     "background_memory_manager",
     "create_war_room_runner",
-    "events_compaction_config",
+    "history_compactor",
+    "persistent_memory_db",
     "root_agent",
 ]

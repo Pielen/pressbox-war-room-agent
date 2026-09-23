@@ -209,53 +209,17 @@ try:
     )
     from google.adk.memory import InMemoryMemoryService  # type: ignore[import-untyped]
     from google.adk.runners import Runner  # type: ignore[import-untyped]
-    from google.adk.sessions import (  # type: ignore[import-untyped]
-        DatabaseSessionService,
-        InMemorySessionService,
-    )
+    from google.adk.sessions import InMemorySessionService  # type: ignore[import-untyped]
     from google.adk.tools import (  # type: ignore[import-untyped]
         FunctionTool,
         ToolContext,
         exit_loop,
     )
 
-    try:
-        from google.adk.apps.app import (  # type: ignore[import-untyped]
-            App,
-            EventsCompactionConfig,
-        )
-    except ImportError:
-
-        @dataclass
-        class EventsCompactionConfig:
-            compaction_interval: int = 4
-            overlap_size: int = 2
-
-        @dataclass
-        class App:
-            name: str
-            root_agent: Any
-            events_compaction_config: Optional[EventsCompactionConfig] = None
-
     ADK_AVAILABLE = True
 
 except ImportError:
     ADK_AVAILABLE = False
-
-    @dataclass
-    class EventsCompactionConfig:
-        """ADK EventsCompactionConfig for sliding-window history compaction."""
-
-        compaction_interval: int = 4
-        overlap_size: int = 2
-
-    @dataclass
-    class App:
-        """ADK App container with events_compaction_config."""
-
-        name: str
-        root_agent: Any
-        events_compaction_config: Optional[EventsCompactionConfig] = None
 
     @dataclass
     class EventActions:
@@ -273,14 +237,10 @@ except ImportError:
             state: Optional[dict[str, Any]] = None,
             agent_name: str = "WarRoomAgent",
             invocation_id: Optional[str] = None,
-            user_id: str = "default_analyst",
-            session_id: Optional[str] = None,
         ) -> None:
             self.state: dict[str, Any] = state if state is not None else {}
             self.agent_name: str = agent_name
             self.invocation_id: str = invocation_id or f"inv-{uuid.uuid4().hex[:8]}"
-            self.user_id: str = user_id
-            self.session_id: str = session_id or f"session-{uuid.uuid4().hex[:8]}"
             self.actions: EventActions = EventActions()
 
     class FunctionTool:
@@ -444,13 +404,6 @@ except ImportError:
         ) -> Optional[dict[str, Any]]:
             return self._sessions.get((app_name, user_id, session_id))
 
-    class DatabaseSessionService(InMemorySessionService):
-        """Compatible ADK DatabaseSessionService backed by SQLite / SQL URL."""
-
-        def __init__(self, db_url: str = "sqlite:///./pressbox_war_room_state.db") -> None:
-            super().__init__()
-            self.db_url = db_url
-
     class InMemoryMemoryService:
         """Compatible ADK InMemoryMemoryService for cross-session search."""
 
@@ -489,12 +442,9 @@ except ImportError:
 
 __all__ = [
     "ADK_AVAILABLE",
-    "App",
     "BaseAgent",
     "BaseModel",
     "ConfigDict",
-    "DatabaseSessionService",
-    "EventsCompactionConfig",
     "Field",
     "FunctionTool",
     "InMemoryMemoryService",

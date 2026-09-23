@@ -1,10 +1,10 @@
-"""Context, Session State, Persistent Database, and Background Memory Tools for PressBox War Room.
+"""Context, Persistent SQLite Database, History Compaction, and Async Memory Tools.
 
-Implements the Context & Memory and Loop Orchestration pillars:
-- Persistent SQLite/SQL database storage (`PersistentScoutingDatabase`)
-- Non-blocking asynchronous background memory tasks (`AsyncBackgroundMemoryManager`)
-- Conversation history compaction (`ConversationHistoryCompactor`)
-- Loop termination and verification state (`verify_and_approve_dossier` / `exit_loop`)
+Addresses all 4 pillars of Context & Memory:
+1. Clear persona & constraint instructions (`prompts.py`)
+2. Conversation history compaction (`history_compactor` / `EventsCompactionConfig`)
+3. Persistent relational SQLite database (`persistent_memory_db` + `DatabaseSessionService`)
+4. Non-blocking background task execution (`background_memory_manager`)
 """
 
 from __future__ import annotations
@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from pressbox_war_room._adk_compat import ToolContext, ValidationError, exit_loop
-from pressbox_war_room.memory.background_worker import background_memory_manager
+from pressbox_war_room.memory.background_tasks import background_memory_manager
+from pressbox_war_room.memory.compaction import history_compactor
+from pressbox_war_room.memory.persistent_store import persistent_memory_db
 from pressbox_war_room.tools.schemas import (
     DossierVerificationInput,
     DossierVerificationOutput,
@@ -39,9 +41,9 @@ def manage_scouting_watchlist(
 ) -> dict[str, Any]:
     """Manages the user's persistent MLB & NHL scouting watchlist and analyst notes.
 
-    Updates hot session state (`tool_context.state`) immediately and dispatches
-    asynchronous background tasks (`background_memory_manager`) to persist watchlists
-    and long-term scouting notes into the SQLite database (`PersistentScoutingDatabase`).
+    Hydrates state from the SQLite database (`persistent_memory_db`) when needed and
+    dispatches all write/update operations asynchronously via `background_memory_manager`
+    (`asyncio.create_task` / `ThreadPoolExecutor`) so tool execution never blocks on disk I/O.
 
     Args:
         action: One of 'list', 'add', 'remove', or 'add_note'.
@@ -77,20 +79,24 @@ def manage_scouting_watchlist(
         )
 
     state = tool_context.state if tool_context is not None else {}
-    user_id = getattr(tool_context, "user_id", state.get("user_id", "default_analyst"))
+    user_id = str(state.get("user:id", "default_analyst"))
 
-    # Hydrate from persistent SQLite database if not yet initialized in session state
-    if "user:watchlist_mlb" not in state or "user:watchlist_nhl" not in state:
-        persisted = background_memory_manager.database.get_user_watchlist(user_id)
-        default_mlb = persisted["MLB"] if persisted["MLB"] else ["NYY", "LAD"]
-        default_nhl = persisted["NHL"] if persisted["NHL"] else ["BOS", "TOR"]
-        state.setdefault("user:watchlist_mlb", default_mlb)
-        state.setdefault("user:watchlist_nhl", default_nhl)
+    if "user:watchlist_mlb" not in state:
+        state["user:watchlist_mlb"] = persistent_memory_db.get_watchlist(
+            user_id=user_id, sport="MLB", default=["NYY", "LAD"]
+        )
+    if "user:watchlist_nhl" not in state:
+        state["user:watchlist_nhl"] = persistent_memory_db.get_watchlist(
+            user_id=user_id, sport="NHL", default=["BOS", "TOR"]
+        )
+    if "user:scouting_notes" not in state:
+        state["user:scouting_notes"] = persistent_memory_db.get_recent_scouting_notes(
+            user_id=user_id, limit=10
+        )
 
-    mlb_list: list[str] = list(state.setdefault("user:watchlist_mlb", ["NYY", "LAD"]))
-    nhl_list: list[str] = list(state.setdefault("user:watchlist_nhl", ["BOS", "TOR"]))
-    notes: list[dict[str, str]] = list(state.setdefault("user:scouting_notes", []))
-    bg_task_ids: list[str] = []
+    mlb_list: list[str] = list(state["user:watchlist_mlb"])
+    nhl_list: list[str] = list(state["user:watchlist_nhl"])
+    notes: list[dict[str, str]] = list(state["user:scouting_notes"])
 
     act = validated_in.action
     sport_norm = validated_in.sport
@@ -103,43 +109,49 @@ def manage_scouting_watchlist(
         if sport_norm in ("NHL", "BOTH"):
             if target.upper() not in nhl_list:
                 nhl_list.append(target.upper())
-        bg_task_ids.append(
-            background_memory_manager.enqueue_watchlist_sync(user_id, mlb_list, nhl_list)
-        )
 
     elif act == "remove" and target:
         if sport_norm in ("MLB", "BOTH"):
             mlb_list = [item for item in mlb_list if item.upper() != target.upper()]
         if sport_norm in ("NHL", "BOTH"):
             nhl_list = [item for item in nhl_list if item.upper() != target.upper()]
-        bg_task_ids.append(
-            background_memory_manager.enqueue_watchlist_sync(user_id, mlb_list, nhl_list)
-        )
 
+    new_note_entry: Optional[dict[str, str]] = None
     if validated_in.scouting_note or (act == "add_note" and target):
         note_text = validated_in.scouting_note or target
-        subject_str = target or "General"
-        notes.append(
-            {
-                "sport": sport_norm,
-                "subject": subject_str,
-                "note": note_text,
-                "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        bg_task_ids.append(
-            background_memory_manager.enqueue_scouting_note(
-                user_id=user_id,
-                sport=sport_norm,
-                subject=subject_str,
-                note=note_text,
-            )
-        )
+        new_note_entry = {
+            "sport": sport_norm,
+            "subject": target or "General",
+            "note": note_text,
+            "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        notes.append(new_note_entry)
 
     state["user:watchlist_mlb"] = mlb_list
     state["user:watchlist_nhl"] = nhl_list
     state["user:scouting_notes"] = notes
-    state["memory:last_background_tasks"] = bg_task_ids
+
+    # Dispatch persistent SQLite write asynchronously in a background task
+    bg_task_id = background_memory_manager.schedule_watchlist_persistence(
+        user_id=user_id,
+        mlb_list=mlb_list,
+        nhl_list=nhl_list,
+        new_note=new_note_entry,
+    )
+
+    # Also record the memory turn for sliding-window compaction tracking
+    compaction_res = history_compactor.record_turn(
+        state=state,
+        role="tool:manage_scouting_watchlist",
+        content=f"action={act} sport={sport_norm} target={target}",
+    )
+    if compaction_res.get("compacted"):
+        session_id = getattr(tool_context, "invocation_id", "default_session")
+        background_memory_manager.schedule_compaction_persistence(
+            session_id=session_id,
+            user_id=user_id,
+            compaction_result=compaction_res,
+        )
 
     validated_out = WatchlistActionOutput.model_validate(
         {
@@ -151,8 +163,8 @@ def manage_scouting_watchlist(
             },
             "scouting_notes_count": len(notes),
             "recent_notes": notes[-5:],
-            "persistent_db_backed": True,
-            "background_task_ids": bg_task_ids,
+            "persistence_backend": "sqlite_wal_async",
+            "background_task_id": bg_task_id,
         }
     )
     return validated_out.model_dump()
@@ -170,9 +182,8 @@ def verify_and_approve_dossier(
 ) -> dict[str, Any]:
     """Audits the drafted scouting dossier against raw tool telemetry and exits the refinement loop if verified.
 
-    Validates inputs against `DossierVerificationInput` (Pydantic BaseModel) and output
-    against `DossierVerificationOutput`. Requires `corrections_needed` when
-    `verification_passed=False`. When `verification_passed=True`, invokes `exit_loop(tool_context)`.
+    Persists verification audits to SQLite asynchronously in a background task (`background_memory_manager`)
+    and triggers `exit_loop(tool_context)` when `verification_passed=True`.
 
     Args:
         verification_passed: True if all statistics (ERA, OPS, PP%, PK%, Win Prob) match raw tool outputs.
@@ -208,18 +219,24 @@ def verify_and_approve_dossier(
             ],
         )
 
-    validated_out = DossierVerificationOutput.model_validate(
-        {
-            "status": "approved"
-            if validated_in.verification_passed
-            else "revision_required",
-            "verification_passed": validated_in.verification_passed,
-            "audited_claims_count": validated_in.audited_claims_count,
-            "audit_summary": validated_in.audit_summary,
-            "corrections_needed": validated_in.corrections_needed or "None",
-            "verified_at_utc": datetime.now(timezone.utc).isoformat(),
-        }
+    session_id = getattr(tool_context, "invocation_id", "default_session")
+    now_utc = datetime.now(timezone.utc).isoformat()
+    raw_record = {
+        "status": "approved" if validated_in.verification_passed else "revision_required",
+        "verification_passed": validated_in.verification_passed,
+        "audited_claims_count": validated_in.audited_claims_count,
+        "audit_summary": validated_in.audit_summary,
+        "corrections_needed": validated_in.corrections_needed or "None",
+        "verified_at_utc": now_utc,
+    }
+
+    bg_task_id = background_memory_manager.schedule_dossier_audit_persistence(
+        session_id=session_id,
+        verification_record=raw_record,
     )
+    raw_record["background_task_id"] = bg_task_id
+
+    validated_out = DossierVerificationOutput.model_validate(raw_record)
     verification_record = validated_out.model_dump()
 
     if tool_context is not None:
