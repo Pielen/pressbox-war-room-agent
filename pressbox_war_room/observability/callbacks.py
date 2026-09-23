@@ -139,15 +139,33 @@ def _extract_state(context_obj: Any) -> Optional[dict[str, Any]]:
 
 
 def before_agent_callback(callback_context: Any) -> Optional[Any]:
-    """ADK before_agent_callback: initializes default session state and starts tracing."""
+    """ADK before_agent_callback: hydrates state from SQLite DB and starts tracing."""
+    from pressbox_war_room.memory.persistent_store import persistent_memory_db
+
     agent_name = getattr(callback_context, "agent_name", "WarRoomAgent")
     telemetry_collector.start_timer(f"agent:{agent_name}")
 
     state = _extract_state(callback_context)
     if state is not None:
-        state.setdefault("user:watchlist_mlb", ["NYY", "LAD", "BOS", "CHC"])
-        state.setdefault("user:watchlist_nhl", ["BOS", "TOR", "EDM", "FLA"])
-        state.setdefault("user:scouting_notes", [])
+        user_id = str(state.setdefault("user:id", "default_analyst"))
+        session_id = getattr(callback_context, "invocation_id", "default_session")
+        if "user:watchlist_mlb" not in state:
+            state["user:watchlist_mlb"] = persistent_memory_db.get_watchlist(
+                user_id=user_id, sport="MLB", default=["NYY", "LAD", "BOS", "CHC"]
+            )
+        if "user:watchlist_nhl" not in state:
+            state["user:watchlist_nhl"] = persistent_memory_db.get_watchlist(
+                user_id=user_id, sport="NHL", default=["BOS", "TOR", "EDM", "FLA"]
+            )
+        if "user:scouting_notes" not in state:
+            state["user:scouting_notes"] = persistent_memory_db.get_recent_scouting_notes(
+                user_id=user_id, limit=10
+            )
+        if "memory:compacted_history_summary" not in state:
+            saved_summary = persistent_memory_db.get_compacted_summary(session_id)
+            state["memory:compacted_history_summary"] = (
+                saved_summary["summary_text"] if saved_summary else ""
+            )
         state.setdefault("mlb_scouting_intel", "No MLB scouting data gathered yet.")
         state.setdefault("nhl_scouting_intel", "No NHL scouting data gathered yet.")
         state.setdefault("dossier_draft", "No scouting dossier drafted yet.")
@@ -160,7 +178,9 @@ def before_agent_callback(callback_context: Any) -> Optional[Any]:
 
 
 def after_agent_callback(callback_context: Any) -> Optional[Any]:
-    """ADK after_agent_callback: records agent completion latency and span telemetry."""
+    """ADK after_agent_callback: records agent latency and dispatches async background memory sync."""
+    from pressbox_war_room.memory.background_tasks import background_memory_manager
+
     agent_name = getattr(callback_context, "agent_name", "WarRoomAgent")
     record = telemetry_collector.stop_timer(
         key=f"agent:{agent_name}",
@@ -179,13 +199,24 @@ def after_agent_callback(callback_context: Any) -> Optional[Any]:
                 "timestamp": record.started_at_utc,
             }
         )
+        # Dispatch non-blocking background persistence of current watchlists to SQLite
+        user_id = str(state.get("user:id", "default_analyst"))
+        bg_id = background_memory_manager.schedule_watchlist_persistence(
+            user_id=user_id,
+            mlb_list=list(state.get("user:watchlist_mlb", ["NYY", "LAD"])),
+            nhl_list=list(state.get("user:watchlist_nhl", ["BOS", "TOR"])),
+        )
+        state["memory:last_background_task_id"] = bg_id
     return None
 
 
 def before_model_callback(
     callback_context: Any, llm_request: Any = None
 ) -> Optional[dict[str, Any]]:
-    """ADK before_model_callback: enforces safety guardrails and starts model timer."""
+    """ADK before_model_callback: enforces guardrails and compacts conversation history."""
+    from pressbox_war_room.memory.background_tasks import background_memory_manager
+    from pressbox_war_room.memory.compaction import history_compactor
+
     agent_name = getattr(callback_context, "agent_name", "WarRoomAgent")
     telemetry_collector.start_timer(f"model:{agent_name}")
 
@@ -206,6 +237,25 @@ def before_model_callback(
                     f"disallowed pattern '{pattern}'."
                 ),
             }
+
+    state = _extract_state(callback_context)
+    if state is not None:
+        if request_text:
+            compaction_res = history_compactor.record_turn(
+                state=state, role="user", content=str(llm_request)
+            )
+        else:
+            compaction_res = history_compactor.compact_if_needed(
+                state=state, llm_request=llm_request
+            )
+        if compaction_res.get("compacted"):
+            session_id = getattr(callback_context, "invocation_id", "default_session")
+            user_id = str(state.get("user:id", "default_analyst"))
+            background_memory_manager.schedule_compaction_persistence(
+                session_id=session_id,
+                user_id=user_id,
+                compaction_result=compaction_res,
+            )
     return None
 
 

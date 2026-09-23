@@ -101,6 +101,67 @@ class TestAgentOrchestrationAndObservability(unittest.TestCase):
         self.assertEqual(payload["eval_set_id"], "pressbox_war_room_scouting_evalset")
         self.assertGreaterEqual(len(payload["eval_cases"]), 3)
 
+    def test_persistent_sqlite_db_history_compaction_and_async_background_tasks(self) -> None:
+        from pressbox_war_room.agent import app
+        from pressbox_war_room.memory import (
+            background_memory_manager,
+            history_compactor,
+            persistent_memory_db,
+        )
+        from pressbox_war_room.tools.memory_tools import manage_scouting_watchlist
+
+        # 1. Verify ADK App is configured with EventsCompactionConfig
+        self.assertIsNotNone(app.events_compaction_config)
+        self.assertEqual(app.events_compaction_config.compaction_interval, 5)
+        self.assertEqual(app.events_compaction_config.overlap_size, 2)
+
+        # 2. Verify async background watchlist + note write to SQLite DB
+        ctx = ToolContext(state={"user:id": "sqlite_test_user"}, invocation_id="sess-compaction-01")
+        res = manage_scouting_watchlist(
+            action="add",
+            sport="MLB",
+            team_or_player="ATL",
+            scouting_note="Chris Sale slider whiff rate > 40%",
+            tool_context=ctx,
+        )
+        self.assertEqual(res["persistence_backend"], "sqlite_wal_async")
+        self.assertTrue(res["background_task_id"].startswith("bg-"))
+
+        # Wait for background threads to flush to SQLite
+        completed = background_memory_manager.flush_all()
+        self.assertGreaterEqual(completed, 1)
+
+        # Verify data is durably persisted in SQLite tables
+        db_mlb = persistent_memory_db.get_watchlist("sqlite_test_user", "MLB")
+        self.assertIn("ATL", db_mlb)
+        db_notes = persistent_memory_db.get_recent_scouting_notes("sqlite_test_user")
+        self.assertTrue(any("Chris Sale" in n["note"] for n in db_notes))
+
+        # 3. Verify sliding-window history compaction & async SQLite checkpointing
+        for i in range(6):
+            comp_res = history_compactor.record_turn(
+                state=ctx.state,
+                role="user" if i % 2 == 0 else "model",
+                content=f"Turn {i}: Detailed MLB and NHL scouting stat breakdown #{i}",
+            )
+            if comp_res.get("compacted"):
+                background_memory_manager.schedule_compaction_persistence(
+                    session_id="sess-compaction-01",
+                    user_id="sqlite_test_user",
+                    compaction_result=comp_res,
+                )
+
+        background_memory_manager.flush_all()
+        self.assertIn("memory:compacted_history_summary", ctx.state)
+        self.assertTrue(len(ctx.state["memory:compacted_history_summary"]) > 10)
+        self.assertLess(
+            len(ctx.state["memory:conversation_turns"]),
+            history_compactor.compaction_interval,
+        )
+        saved_compaction = persistent_memory_db.get_compacted_summary("sess-compaction-01")
+        self.assertIsNotNone(saved_compaction)
+        self.assertGreaterEqual(saved_compaction["compacted_turn_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

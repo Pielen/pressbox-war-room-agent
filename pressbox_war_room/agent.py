@@ -1,25 +1,51 @@
-"""Root Agent (`WarRoomCoordinator`) and ADK Runner factory for PressBox War Room.
+"""Root Agent (`WarRoomCoordinator`), ADK App with `EventsCompactionConfig`, and Persistent Runner Factory.
 
-Exposes `root_agent` as the canonical Google ADK entry point (`adk web`, `adk run`,
-`adk api_server`, and `AgentEvaluator`).
+Exposes `root_agent` and `app` as canonical Google ADK entry points (`adk web`, `adk run`,
+`adk api_server`, and `AgentEvaluator`), wired with:
+- Persistent SQLite / SQL database (`DatabaseSessionService` + `SQLiteScoutingMemoryDatabase`)
+- Sliding-window conversation history compaction (`EventsCompactionConfig` + `ConversationHistoryCompactor`)
+- Non-blocking background memory execution (`AsyncBackgroundMemoryManager`)
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 try:
     from google.adk.agents import LlmAgent  # type: ignore[import-untyped]
+    from google.adk.apps.app import App  # type: ignore[import-untyped]
     from google.adk.memory import InMemoryMemoryService  # type: ignore[import-untyped]
     from google.adk.runners import Runner  # type: ignore[import-untyped]
-    from google.adk.sessions import InMemorySessionService  # type: ignore[import-untyped]
 except ImportError:
     from pressbox_war_room._adk_compat import (
         InMemoryMemoryService,
-        InMemorySessionService,
         LlmAgent,
         Runner,
     )
 
+    class App:  # type: ignore[no-redef]
+        """Compatible ADK App wrapper binding root_agent and events_compaction_config."""
+
+        def __init__(
+            self,
+            name: str,
+            root_agent: Any,
+            events_compaction_config: Any = None,
+        ) -> None:
+            self.name = name
+            self.root_agent = root_agent
+            self.events_compaction_config = events_compaction_config
+
+
 from pressbox_war_room.config import settings
+from pressbox_war_room.memory import (
+    DEFAULT_DATABASE_URL,
+    DEFAULT_EVENTS_COMPACTION_CONFIG,
+    background_memory_manager,
+    create_persistent_adk_session_service,
+    history_compactor,
+    persistent_memory_db,
+)
 from pressbox_war_room.observability.callbacks import (
     after_agent_callback,
     after_model_callback,
@@ -51,8 +77,9 @@ root_agent = LlmAgent(
     description=(
         "Root coordinator for the PressBox War Room multi-agent MLB & NHL scouting "
         "and tactical matchup analytics system. Routes queries to specialist MLB/NHL "
-        "scout sub-agents, manages persistent scouting watchlists in session memory, "
-        "and orchestrates the parallel-gather + critic-verified dossier pipeline."
+        "scout sub-agents, manages persistent scouting watchlists in SQLite & session memory "
+        "via non-blocking background tasks, compacts long conversation history, and "
+        "orchestrates the parallel-gather + critic-verified dossier pipeline."
     ),
     instruction=WAR_ROOM_COORDINATOR_INSTRUCTION,
     tools=[
@@ -78,10 +105,18 @@ root_agent = LlmAgent(
     after_tool_callback=after_tool_callback,
 )
 
+app = App(
+    name=settings.app_name,
+    root_agent=root_agent,
+    events_compaction_config=DEFAULT_EVENTS_COMPACTION_CONFIG,
+)
 
-def create_war_room_runner() -> tuple[Runner, InMemorySessionService, InMemoryMemoryService]:
-    """Creates an ADK Runner pre-configured with Session and Memory services."""
-    session_service = InMemorySessionService()
+
+def create_war_room_runner(
+    db_url: str = DEFAULT_DATABASE_URL,
+) -> tuple[Runner, Any, InMemoryMemoryService]:
+    """Creates an ADK Runner backed by `DatabaseSessionService` (SQLite/PostgreSQL) and MemoryService."""
+    session_service = create_persistent_adk_session_service(db_url=db_url)
     memory_service = InMemoryMemoryService()
     runner = Runner(
         agent=root_agent,
@@ -90,3 +125,13 @@ def create_war_room_runner() -> tuple[Runner, InMemorySessionService, InMemoryMe
         memory_service=memory_service,
     )
     return runner, session_service, memory_service
+
+
+__all__ = [
+    "app",
+    "background_memory_manager",
+    "create_war_room_runner",
+    "history_compactor",
+    "persistent_memory_db",
+    "root_agent",
+]
