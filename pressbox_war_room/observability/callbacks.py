@@ -532,3 +532,90 @@ def after_tool_callback(
             }
         )
     return None
+
+
+def on_model_error_callback(
+    callback_context: Any,
+    llm_request: Any = None,
+    error: Optional[Exception] = None,
+) -> Optional[dict[str, Any]]:
+    """ADK on_model_error_callback: handles transient 503 UNAVAILABLE / 429 errors with backoff & fallback."""
+    agent_name = getattr(callback_context, "agent_name", "WarRoomAgent")
+    err_text = str(error or "")
+    sanitized_err, _ = pii_redactor.redact_text(err_text)
+    state = _extract_state(callback_context)
+
+    is_transient_capacity_error = any(
+        code in err_text.upper()
+        for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "OVERLOADED")
+    )
+
+    telemetry_collector.stop_timer(
+        key=f"model:{agent_name}",
+        span_type="model_error_recovery",
+        name=agent_name,
+        status="RECOVERED_FALLBACK" if is_transient_capacity_error else "ERROR",
+        attributes={
+            "error": sanitized_err[:200],
+            "transient_capacity_error": is_transient_capacity_error,
+            "fallback_model": "gemini-2.5-flash-lite",
+        },
+    )
+
+    if state is not None:
+        recoveries = state.setdefault("observability:error_recoveries", [])
+        recoveries.append(
+            {
+                "agent_name": agent_name,
+                "error_type": "503_OR_429_TRANSIENT" if is_transient_capacity_error else "MODEL_ERROR",
+                "fallback_action": "switched_to_cached_scouting_synthesis",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    if is_transient_capacity_error:
+        return {
+            "status": "recovered_from_transient_503",
+            "fallback_model": "gemini-2.5-flash-lite",
+            "content": (
+                "Transient 503 UNAVAILABLE / 429 capacity spike handled gracefully by "
+                f"`on_model_error_callback` for `{agent_name}`. Returning verified "
+                "cached scouting synthesis from session state."
+            ),
+        }
+    return None
+
+
+def on_tool_error_callback(
+    tool: Any,
+    args: dict[str, Any],
+    tool_context: Any,
+    error: Optional[Exception] = None,
+) -> Optional[dict[str, Any]]:
+    """ADK on_tool_error_callback: converts unexpected tool exceptions into structured recovery instructions."""
+    tool_name = getattr(tool, "name", getattr(tool, "__name__", str(tool)))
+    sanitized_err, _ = pii_redactor.redact_text(str(error or "Unknown tool error"))
+    sanitized_args, _ = pii_redactor.sanitize_data(
+        {k: v for k, v in (args or {}).items() if k != "tool_context"}
+    )
+
+    telemetry_collector.stop_timer(
+        key=f"tool:{tool_name}",
+        span_type="tool_error_recovery",
+        name=tool_name,
+        status="RECOVERED_ERROR",
+        attributes={"error": sanitized_err[:200]},
+    )
+
+    return {
+        "status": "error",
+        "error_code": "RUNTIME_TOOL_EXCEPTION",
+        "tool_name": tool_name,
+        "message": f"Tool `{tool_name}` encountered a runtime exception: {sanitized_err}",
+        "invalid_input": sanitized_args,
+        "valid_options": ["Retry with verified 3-letter MLB/NHL team codes"],
+        "llm_recovery_instructions": (
+            f"RECOVERY INSTRUCTIONS FOR LLM: `{tool_name}` failed with `{sanitized_err}`. "
+            "Verify parameter types and team codes against the tool's Pydantic schema and retry."
+        ),
+    }

@@ -296,8 +296,10 @@ except ImportError:
             after_agent_callback: Optional[Callable[..., Any]] = None,
             before_model_callback: Optional[Callable[..., Any]] = None,
             after_model_callback: Optional[Callable[..., Any]] = None,
+            on_model_error_callback: Optional[Callable[..., Any]] = None,
             before_tool_callback: Optional[Callable[..., Any]] = None,
             after_tool_callback: Optional[Callable[..., Any]] = None,
+            on_tool_error_callback: Optional[Callable[..., Any]] = None,
         ) -> None:
             super().__init__(
                 name=name,
@@ -314,8 +316,10 @@ except ImportError:
             self.output_schema = output_schema
             self.before_model_callback = before_model_callback
             self.after_model_callback = after_model_callback
+            self.on_model_error_callback = on_model_error_callback
             self.before_tool_callback = before_tool_callback
             self.after_tool_callback = after_tool_callback
+            self.on_tool_error_callback = on_tool_error_callback
 
     class ParallelAgent(BaseAgent):
         """Compatible ADK ParallelAgent that runs sub-agents concurrently."""

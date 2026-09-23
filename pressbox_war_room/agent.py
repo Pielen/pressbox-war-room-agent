@@ -53,6 +53,8 @@ from pressbox_war_room.observability.callbacks import (
     before_agent_callback,
     before_model_callback,
     before_tool_callback,
+    on_model_error_callback,
+    on_tool_error_callback,
 )
 from pressbox_war_room.prompts import WAR_ROOM_COORDINATOR_INSTRUCTION
 from pressbox_war_room.sub_agents.dossier_pipeline import full_war_room_pipeline
@@ -101,8 +103,10 @@ root_agent = LlmAgent(
     after_agent_callback=after_agent_callback,
     before_model_callback=before_model_callback,
     after_model_callback=after_model_callback,
+    on_model_error_callback=on_model_error_callback,
     before_tool_callback=before_tool_callback,
     after_tool_callback=after_tool_callback,
+    on_tool_error_callback=on_tool_error_callback,
 )
 
 app = App(

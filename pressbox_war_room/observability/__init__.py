@@ -1,4 +1,4 @@
-"""Observability, OpenTelemetry tracing, Pre-Execution Intent Logging, and PII Redaction."""
+"""Observability, OpenTelemetry tracing, Pre-Execution Intent Logging, PII Redaction, and Error Recovery."""
 
 from pressbox_war_room.observability.callbacks import (
     WarRoomTelemetryCollector,
@@ -10,6 +10,8 @@ from pressbox_war_room.observability.callbacks import (
     before_tool_callback,
     classify_scouting_intent,
     describe_tool_intent,
+    on_model_error_callback,
+    on_tool_error_callback,
     telemetry_collector,
 )
 from pressbox_war_room.observability.pii_redactor import (
@@ -30,6 +32,8 @@ __all__ = [
     "before_tool_callback",
     "classify_scouting_intent",
     "describe_tool_intent",
+    "on_model_error_callback",
+    "on_tool_error_callback",
     "pii_redactor",
     "telemetry_collector",
 ]

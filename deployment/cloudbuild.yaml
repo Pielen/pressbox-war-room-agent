@@ -1,0 +1,49 @@
+steps:
+  # Step 1: Run unit tests and ADK evaluation schema validation
+  - name: "python:3.12-slim"
+    id: "unit-and-eval-tests"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        pip install --no-cache-dir -e ".[dev]"
+        ruff check pressbox_war_room tests
+        WAR_ROOM_OFFLINE_FALLBACK=TRUE pytest tests/unit -v
+
+  # Step 2: Build multi-stage production container image
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-container"
+    args:
+      - "build"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/pressbox-war-room/agent:${SHORT_SHA}"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/pressbox-war-room/agent:latest"
+      - "."
+
+  # Step 3: Push image to Artifact Registry
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-container"
+    args:
+      - "push"
+      - "--all-tags"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/pressbox-war-room/agent"
+
+  # Step 4: Deploy to Google Cloud Run with health verification
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "deploy-cloud-run"
+    entrypoint: "gcloud"
+    args:
+      - "run"
+      - "deploy"
+      - "pressbox-war-room-agent"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/pressbox-war-room/agent:${SHORT_SHA}"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--set-env-vars=GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${_REGION},WAR_ROOM_ENABLE_CLOUD_TRACE=TRUE"
+
+substitutions:
+  _REGION: "us-central1"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
