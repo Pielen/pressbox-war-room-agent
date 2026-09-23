@@ -152,7 +152,7 @@ class TestPressBoxWarRoomTools(unittest.TestCase):
             tool_context=ctx,
         )
         self.assertIn("EDM", res_add["watchlist"]["NHL"])
-        self.assertGreaterEqual(res_add["scouting_notes_count"], 1)
+        self.assertEqual(res_add["scouting_notes_count"], 1)
 
         res_remove = manage_scouting_watchlist(
             action="remove",

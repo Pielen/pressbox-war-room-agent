@@ -744,8 +744,8 @@ class WatchlistActionOutput(BaseModel):
     watchlist: dict[str, list[str]]
     scouting_notes_count: int
     recent_notes: list[dict[str, str]]
-    persistence_backend: str = "sqlite_wal_async"
-    background_task_id: str = "bg-sync"
+    persistent_db_backed: bool = True
+    background_task_ids: list[str] = Field(default_factory=list)
 
 
 class DossierVerificationOutput(BaseModel):
@@ -757,7 +757,6 @@ class DossierVerificationOutput(BaseModel):
     audit_summary: str
     corrections_needed: str
     verified_at_utc: str
-    background_task_id: str = "bg-audit"
 
 
 TOOL_JSON_SCHEMAS: dict[str, dict[str, Any]] = {}

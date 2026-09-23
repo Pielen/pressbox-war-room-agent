@@ -53,6 +53,25 @@ class WarRoomConfig:
     max_refinement_iterations: int = field(
         default_factory=lambda: int(os.getenv("WAR_ROOM_MAX_REFINEMENTS", "2"))
     )
+    sqlite_db_path: str = field(
+        default_factory=lambda: os.getenv(
+            "WAR_ROOM_SQLITE_DB_PATH", "./pressbox_war_room_state.db"
+        )
+    )
+    database_url: str = field(
+        default_factory=lambda: os.getenv(
+            "WAR_ROOM_DATABASE_URL", "sqlite:///./pressbox_war_room_state.db"
+        )
+    )
+    compaction_interval: int = field(
+        default_factory=lambda: int(os.getenv("WAR_ROOM_COMPACTION_INTERVAL", "4"))
+    )
+    compaction_overlap_size: int = field(
+        default_factory=lambda: int(os.getenv("WAR_ROOM_COMPACTION_OVERLAP", "2"))
+    )
+    max_context_tokens: int = field(
+        default_factory=lambda: int(os.getenv("WAR_ROOM_MAX_CONTEXT_TOKENS", "3000"))
+    )
 
 
 settings = WarRoomConfig()

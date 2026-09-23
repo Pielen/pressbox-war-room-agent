@@ -1,41 +1,23 @@
-"""Memory & Context Management Package for PressBox War Room.
+"""Persistent Database Storage, History Compaction, and Background Memory Worker package."""
 
-Provides:
-- `SQLiteScoutingMemoryDatabase` & `create_persistent_adk_session_service` (Persistent DB)
-- `ConversationHistoryCompactor` & `EventsCompactionConfig` (History Compaction)
-- `AsyncBackgroundMemoryManager` (Asynchronous Background Memory Operations)
-"""
-
-from pressbox_war_room.memory.background_tasks import (
+from pressbox_war_room.memory.background_worker import (
     AsyncBackgroundMemoryManager,
     background_memory_manager,
 )
 from pressbox_war_room.memory.compaction import (
+    CompactionResult,
     ConversationHistoryCompactor,
-    DEFAULT_EVENTS_COMPACTION_CONFIG,
-    EventsCompactionConfig,
-    estimate_token_count,
+    estimate_tokens,
     history_compactor,
 )
-from pressbox_war_room.memory.persistent_store import (
-    DEFAULT_DATABASE_URL,
-    DEFAULT_SQLITE_PATH,
-    SQLiteScoutingMemoryDatabase,
-    create_persistent_adk_session_service,
-    persistent_memory_db,
-)
+from pressbox_war_room.memory.persistent_store import PersistentScoutingDatabase
 
 __all__ = [
     "AsyncBackgroundMemoryManager",
+    "CompactionResult",
     "ConversationHistoryCompactor",
-    "DEFAULT_DATABASE_URL",
-    "DEFAULT_EVENTS_COMPACTION_CONFIG",
-    "DEFAULT_SQLITE_PATH",
-    "EventsCompactionConfig",
-    "SQLiteScoutingMemoryDatabase",
+    "PersistentScoutingDatabase",
     "background_memory_manager",
-    "create_persistent_adk_session_service",
-    "estimate_token_count",
+    "estimate_tokens",
     "history_compactor",
-    "persistent_memory_db",
 ]
