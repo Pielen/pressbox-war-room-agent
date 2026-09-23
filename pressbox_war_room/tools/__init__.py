@@ -1,4 +1,4 @@
-"""Tools package for PressBox War Room."""
+"""Tools and Pydantic v2 Input/Output Schemas package for PressBox War Room."""
 
 from pressbox_war_room.tools.analytics_tools import (
     calculate_advanced_matchup_edge,
@@ -19,8 +19,52 @@ from pressbox_war_room.tools.nhl_tools import (
     get_nhl_standings_snapshot,
     get_nhl_team_special_teams_and_goalies,
 )
+from pressbox_war_room.tools.schemas import (
+    DossierVerificationInput,
+    DossierVerificationOutput,
+    MatchupEdgeInput,
+    MatchupEdgeOutput,
+    MLBScheduleInput,
+    MLBScheduleOutput,
+    MLBSplitsInput,
+    MLBSplitsOutput,
+    MLBStandingsInput,
+    MLBStandingsOutput,
+    NHLScheduleInput,
+    NHLScheduleOutput,
+    NHLSpecialTeamsInput,
+    NHLSpecialTeamsOutput,
+    NHLStandingsInput,
+    NHLStandingsOutput,
+    TOOL_JSON_SCHEMAS,
+    ToolErrorResponse,
+    ToolInputValidationError,
+    WatchlistActionInput,
+    WatchlistActionOutput,
+)
 
 __all__ = [
+    "DossierVerificationInput",
+    "DossierVerificationOutput",
+    "MLBScheduleInput",
+    "MLBScheduleOutput",
+    "MLBSplitsInput",
+    "MLBSplitsOutput",
+    "MLBStandingsInput",
+    "MLBStandingsOutput",
+    "MatchupEdgeInput",
+    "MatchupEdgeOutput",
+    "NHLScheduleInput",
+    "NHLScheduleOutput",
+    "NHLSpecialTeamsInput",
+    "NHLSpecialTeamsOutput",
+    "NHLStandingsInput",
+    "NHLStandingsOutput",
+    "TOOL_JSON_SCHEMAS",
+    "ToolErrorResponse",
+    "ToolInputValidationError",
+    "WatchlistActionInput",
+    "WatchlistActionOutput",
     "calculate_advanced_matchup_edge",
     "compute_log5_probability",
     "compute_pythagorean_expectancy",

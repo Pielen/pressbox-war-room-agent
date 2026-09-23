@@ -1,7 +1,9 @@
 """MLB Scouting & Statistical Tools backed by the Official MLB Stats API (`statsapi.mlb.com`).
 
-Includes automatic HTTP retrieval with a rich deterministic snapshot fallback so
-that unit tests, CI pipelines, and offline evaluations never flake.
+Implements strict Pydantic v2 input/output schema validation (`MLBScheduleInput`,
+`MLBSplitsInput`, `MLBStandingsInput`, `MLBScheduleOutput`, `MLBSplitsOutput`,
+`MLBStandingsOutput`) and guided LLM error recovery (`ToolErrorResponse`) with
+zero silent fallbacks.
 """
 
 from __future__ import annotations
@@ -11,8 +13,22 @@ from typing import Any, Optional
 import urllib.error
 import urllib.request
 
-from pressbox_war_room._adk_compat import ToolContext
+from pressbox_war_room._adk_compat import ToolContext, ValidationError
 from pressbox_war_room.config import settings
+from pressbox_war_room.tools.schemas import (
+    MLBScheduleInput,
+    MLBScheduleOutput,
+    MLBSplitsInput,
+    MLBSplitsOutput,
+    MLBStandingsInput,
+    MLBStandingsOutput,
+    SUPPORTED_MLB_LEAGUE_FILTERS,
+    SUPPORTED_MLB_TEAMS,
+    ToolInputValidationError,
+    build_validation_error_response,
+    resolve_mlb_team_code,
+    with_strict_tool_schema,
+)
 
 MLB_TEAM_DIRECTORY: dict[str, dict[str, Any]] = {
     "NYY": {
@@ -64,7 +80,7 @@ MLB_TEAM_DIRECTORY: dict[str, dict[str, Any]] = {
             "era": 3.00,
             "whip": 1.11,
             "k_per_9": 10.5,
-            "arsenal": "4-Seam Fastball (95.7 mph), Splitter,ヨーヨー Curveball, Cutter",
+            "arsenal": "4-Seam Fastball (95.7 mph), Splitter, Curveball, Cutter",
         },
         "key_hitters": [
             {"name": "Shohei Ohtani", "bats": "L", "hr": 54, "ops": 1.036, "wrc_plus": 181},
@@ -187,31 +203,10 @@ MLB_TEAM_DIRECTORY: dict[str, dict[str, Any]] = {
     },
 }
 
-_TEAM_ALIASES: dict[str, str] = {
-    "YANKEES": "NYY",
-    "NEW YORK YANKEES": "NYY",
-    "DODGERS": "LAD",
-    "LOS ANGELES DODGERS": "LAD",
-    "RED SOX": "BOS",
-    "BOSTON RED SOX": "BOS",
-    "CUBS": "CHC",
-    "CHICAGO CUBS": "CHC",
-    "BRAVES": "ATL",
-    "ATLANTA BRAVES": "ATL",
-    "PHILLIES": "PHI",
-    "PHILADELPHIA PHILLIES": "PHI",
-}
-
 
 def normalize_mlb_team_code(raw_team: str) -> str:
-    """Normalizes team names or abbreviations into standard 3-letter MLB codes."""
-    cleaned = raw_team.strip().upper()
-    if cleaned in MLB_TEAM_DIRECTORY:
-        return cleaned
-    for alias, code in _TEAM_ALIASES.items():
-        if alias in cleaned:
-            return code
-    return cleaned[:3] if len(cleaned) >= 3 else "NYY"
+    """Strictly validates and resolves an MLB team name or code (raises ToolInputValidationError on unknown input)."""
+    return resolve_mlb_team_code(raw_team, field_name="team_code")
 
 
 def _try_live_mlb_schedule(team_id: int) -> Optional[dict[str, Any]]:
@@ -246,6 +241,7 @@ def _try_live_mlb_schedule(team_id: int) -> Optional[dict[str, Any]]:
     return None
 
 
+@with_strict_tool_schema(input_model=MLBScheduleInput, output_model=MLBScheduleOutput)
 def get_mlb_schedule_and_probables(
     team_code: str,
     opponent_code: Optional[str] = None,
@@ -253,43 +249,58 @@ def get_mlb_schedule_and_probables(
 ) -> dict[str, Any]:
     """Fetches MLB schedule, probable starting pitchers, and pitch arsenal profiles.
 
+    Validates inputs against `MLBScheduleInput` (Pydantic BaseModel) and validates
+    output against `MLBScheduleOutput`. Returns a structured `ToolErrorResponse` with
+    guided LLM recovery instructions if an unrecognized team code is provided.
+
     Args:
-        team_code: Primary MLB team abbreviation or name (e.g. 'NYY', 'LAD', 'BOS', 'Yankees').
-        opponent_code: Optional opposing MLB team abbreviation (e.g. 'LAD', 'BOS').
+        team_code: Primary MLB team abbreviation or name ('NYY', 'LAD', 'BOS', 'CHC', 'ATL', 'PHI').
+        opponent_code: Optional opposing MLB team abbreviation ('NYY', 'LAD', 'BOS', 'CHC', 'ATL', 'PHI').
         tool_context: Optional ADK ToolContext used to persist scouting intel in session state.
 
     Returns:
-        dict[str, Any]: Structured matchup schedule and probable starting pitcher comparison.
+        dict[str, Any]: Validated `MLBScheduleOutput` dict or `ToolErrorResponse` dict.
     """
-    primary = normalize_mlb_team_code(team_code)
-    opponent = (
-        normalize_mlb_team_code(opponent_code)
-        if opponent_code
-        else ("LAD" if primary != "LAD" else "NYY")
-    )
+    try:
+        validated_in = MLBScheduleInput.model_validate(
+            {"team_code": team_code, "opponent_code": opponent_code}
+        )
+    except (ToolInputValidationError, ValidationError) as exc:
+        return build_validation_error_response(
+            tool_name="get_mlb_schedule_and_probables",
+            exc=exc,
+            raw_inputs={"team_code": team_code, "opponent_code": opponent_code},
+            default_valid_options=list(SUPPORTED_MLB_TEAMS.keys()),
+        )
 
-    primary_info = MLB_TEAM_DIRECTORY.get(primary, MLB_TEAM_DIRECTORY["NYY"])
-    opponent_info = MLB_TEAM_DIRECTORY.get(opponent, MLB_TEAM_DIRECTORY["LAD"])
+    primary = validated_in.team_code
+    opponent = validated_in.opponent_code or ("LAD" if primary != "LAD" else "NYY")
+
+    primary_info = MLB_TEAM_DIRECTORY[primary]
+    opponent_info = MLB_TEAM_DIRECTORY[opponent]
     live_game = _try_live_mlb_schedule(primary_info["team_id"])
 
-    result = {
-        "status": "success",
-        "sport": "MLB",
-        "matchup": f"{opponent_info['name']} ({opponent}) at {primary_info['name']} ({primary})",
-        "data_source": live_game["source"] if live_game else "verified_mlb_stats_snapshot",
-        "home_team": {
-            "code": primary,
-            "name": primary_info["name"],
-            "record": f"{primary_info['wins']}-{primary_info['losses']}",
-            "probable_starter": primary_info["probable_starter"],
-        },
-        "away_team": {
-            "code": opponent,
-            "name": opponent_info["name"],
-            "record": f"{opponent_info['wins']}-{opponent_info['losses']}",
-            "probable_starter": opponent_info["probable_starter"],
-        },
-    }
+    validated_out = MLBScheduleOutput.model_validate(
+        {
+            "status": "success",
+            "sport": "MLB",
+            "matchup": f"{opponent_info['name']} ({opponent}) at {primary_info['name']} ({primary})",
+            "data_source": live_game["source"] if live_game else "verified_mlb_stats_snapshot",
+            "home_team": {
+                "code": primary,
+                "name": primary_info["name"],
+                "record": f"{primary_info['wins']}-{primary_info['losses']}",
+                "probable_starter": primary_info["probable_starter"],
+            },
+            "away_team": {
+                "code": opponent,
+                "name": opponent_info["name"],
+                "record": f"{opponent_info['wins']}-{opponent_info['losses']}",
+                "probable_starter": opponent_info["probable_starter"],
+            },
+        }
+    )
+    result = validated_out.model_dump()
 
     if tool_context is not None:
         intel_store = tool_context.state.setdefault("temp:mlb_intel", {})
@@ -299,6 +310,7 @@ def get_mlb_schedule_and_probables(
     return result
 
 
+@with_strict_tool_schema(input_model=MLBSplitsInput, output_model=MLBSplitsOutput)
 def get_mlb_team_and_pitcher_splits(
     team_code: str,
     opponent_code: Optional[str] = None,
@@ -306,21 +318,37 @@ def get_mlb_team_and_pitcher_splits(
 ) -> dict[str, Any]:
     """Retrieves MLB team offensive platoon splits (vs LHP/RHP), bullpen ERA, and key hitters.
 
+    Validates inputs against `MLBSplitsInput` (Pydantic BaseModel) and output against
+    `MLBSplitsOutput`. Never silently falls back on invalid team codes; returns
+    guided LLM recovery instructions via `ToolErrorResponse`.
+
     Args:
-        team_code: MLB team code or name (e.g. 'NYY', 'LAD', 'BOS', 'CHC', 'ATL', 'PHI').
+        team_code: MLB team code or name ('NYY', 'LAD', 'BOS', 'CHC', 'ATL', 'PHI').
         opponent_code: Optional opponent code to include head-to-head platoon context.
         tool_context: Optional ADK ToolContext to cache split analytics in session state.
 
     Returns:
-        dict[str, Any]: Team hitting splits, run differential, bullpen metrics, and star hitter profiles.
+        dict[str, Any]: Validated `MLBSplitsOutput` dict or `ToolErrorResponse` dict.
     """
-    primary = normalize_mlb_team_code(team_code)
-    primary_info = MLB_TEAM_DIRECTORY.get(primary, MLB_TEAM_DIRECTORY["NYY"])
+    try:
+        validated_in = MLBSplitsInput.model_validate(
+            {"team_code": team_code, "opponent_code": opponent_code}
+        )
+    except (ToolInputValidationError, ValidationError) as exc:
+        return build_validation_error_response(
+            tool_name="get_mlb_team_and_pitcher_splits",
+            exc=exc,
+            raw_inputs={"team_code": team_code, "opponent_code": opponent_code},
+            default_valid_options=list(SUPPORTED_MLB_TEAMS.keys()),
+        )
+
+    primary = validated_in.team_code
+    primary_info = MLB_TEAM_DIRECTORY[primary]
 
     opponent_data = None
-    if opponent_code:
-        opp_code = normalize_mlb_team_code(opponent_code)
-        opp_info = MLB_TEAM_DIRECTORY.get(opp_code, MLB_TEAM_DIRECTORY["LAD"])
+    if validated_in.opponent_code:
+        opp_code = validated_in.opponent_code
+        opp_info = MLB_TEAM_DIRECTORY[opp_code]
         opponent_data = {
             "code": opp_code,
             "name": opp_info["name"],
@@ -337,30 +365,33 @@ def get_mlb_team_and_pitcher_splits(
             "key_hitters": opp_info["key_hitters"],
         }
 
-    result = {
-        "status": "success",
-        "sport": "MLB",
-        "team_code": primary,
-        "team_name": primary_info["name"],
-        "division": primary_info["division"],
-        "record": f"{primary_info['wins']}-{primary_info['losses']}",
-        "runs_scored": primary_info["runs_scored"],
-        "runs_allowed": primary_info["runs_allowed"],
-        "run_differential": primary_info["runs_scored"] - primary_info["runs_allowed"],
-        "offensive_splits": {
-            "overall_ops": primary_info["team_ops"],
-            "vs_lhp_ops": primary_info["vs_lhp_ops"],
-            "vs_rhp_ops": primary_info["vs_rhp_ops"],
-        },
-        "pitching_staff": {
-            "rotation_era": primary_info["rotation_era"],
-            "bullpen_era": primary_info["bullpen_era"],
-            "probable_starter": primary_info["probable_starter"],
-        },
-        "key_hitters": primary_info["key_hitters"],
-        "last_10": primary_info["last_10"],
-        "opponent_comparison": opponent_data,
-    }
+    validated_out = MLBSplitsOutput.model_validate(
+        {
+            "status": "success",
+            "sport": "MLB",
+            "team_code": primary,
+            "team_name": primary_info["name"],
+            "division": primary_info["division"],
+            "record": f"{primary_info['wins']}-{primary_info['losses']}",
+            "runs_scored": primary_info["runs_scored"],
+            "runs_allowed": primary_info["runs_allowed"],
+            "run_differential": primary_info["runs_scored"] - primary_info["runs_allowed"],
+            "offensive_splits": {
+                "overall_ops": primary_info["team_ops"],
+                "vs_lhp_ops": primary_info["vs_lhp_ops"],
+                "vs_rhp_ops": primary_info["vs_rhp_ops"],
+            },
+            "pitching_staff": {
+                "rotation_era": primary_info["rotation_era"],
+                "bullpen_era": primary_info["bullpen_era"],
+                "probable_starter": primary_info["probable_starter"],
+            },
+            "key_hitters": primary_info["key_hitters"],
+            "last_10": primary_info["last_10"],
+            "opponent_comparison": opponent_data,
+        }
+    )
+    result = validated_out.model_dump()
 
     if tool_context is not None:
         intel_store = tool_context.state.setdefault("temp:mlb_intel", {})
@@ -370,20 +401,34 @@ def get_mlb_team_and_pitcher_splits(
     return result
 
 
+@with_strict_tool_schema(input_model=MLBStandingsInput, output_model=MLBStandingsOutput)
 def get_mlb_standings_snapshot(
     league_filter: str = "ALL",
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
     """Returns current MLB division and league standings with run differential and L10 form.
 
+    Validates `league_filter` via `MLBStandingsInput` (Pydantic BaseModel) and returns
+    `ToolErrorResponse` with recovery instructions if an invalid filter is passed.
+
     Args:
-        league_filter: Filter by 'AL', 'NL', or 'ALL' (default 'ALL').
+        league_filter: Filter by 'ALL', 'AL', 'NL', 'AL EAST', 'NL EAST', 'NL CENTRAL', or 'NL WEST'.
         tool_context: Optional ADK ToolContext.
 
     Returns:
-        dict[str, Any]: Ranked MLB standings snapshot.
+        dict[str, Any]: Validated `MLBStandingsOutput` dict or `ToolErrorResponse` dict.
     """
-    normalized_filter = league_filter.strip().upper()
+    try:
+        validated_in = MLBStandingsInput.model_validate({"league_filter": league_filter})
+    except (ToolInputValidationError, ValidationError) as exc:
+        return build_validation_error_response(
+            tool_name="get_mlb_standings_snapshot",
+            exc=exc,
+            raw_inputs={"league_filter": league_filter},
+            default_valid_options=sorted(SUPPORTED_MLB_LEAGUE_FILTERS),
+        )
+
+    normalized_filter = validated_in.league_filter
     teams = []
     for code, info in MLB_TEAM_DIRECTORY.items():
         if normalized_filter in ("ALL", info["league"], info["division"].upper()):
@@ -403,12 +448,15 @@ def get_mlb_standings_snapshot(
             )
 
     teams.sort(key=lambda item: item["win_pct"], reverse=True)
-    result = {
-        "status": "success",
-        "sport": "MLB",
-        "league_filter": normalized_filter,
-        "standings": teams,
-    }
+    validated_out = MLBStandingsOutput.model_validate(
+        {
+            "status": "success",
+            "sport": "MLB",
+            "league_filter": normalized_filter,
+            "standings": teams,
+        }
+    )
+    result = validated_out.model_dump()
 
     if tool_context is not None:
         tool_context.state["temp:mlb_standings"] = result

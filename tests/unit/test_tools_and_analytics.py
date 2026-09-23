@@ -1,4 +1,4 @@
-"""Unit tests for MLB tools, NHL tools, quantitative analytics, and session memory."""
+"""Unit tests for MLB tools, NHL tools, quantitative analytics, Pydantic schemas, and LLM recovery."""
 
 from __future__ import annotations
 
@@ -8,29 +8,79 @@ import unittest
 os.environ["WAR_ROOM_OFFLINE_FALLBACK"] = "TRUE"
 
 from pressbox_war_room._adk_compat import ToolContext
-from pressbox_war_room.tools.analytics_tools import (
+from pressbox_war_room.tools import (
+    TOOL_JSON_SCHEMAS,
     calculate_advanced_matchup_edge,
     compute_log5_probability,
     compute_pythagorean_expectancy,
-)
-from pressbox_war_room.tools.memory_tools import (
-    manage_scouting_watchlist,
-    verify_and_approve_dossier,
-)
-from pressbox_war_room.tools.mlb_tools import (
     get_mlb_schedule_and_probables,
     get_mlb_standings_snapshot,
     get_mlb_team_and_pitcher_splits,
-)
-from pressbox_war_room.tools.nhl_tools import (
     get_nhl_schedule_and_matchup,
     get_nhl_standings_snapshot,
     get_nhl_team_special_teams_and_goalies,
+    manage_scouting_watchlist,
+    verify_and_approve_dossier,
 )
 
 
 class TestPressBoxWarRoomTools(unittest.TestCase):
-    """Verifies Tool & Interface Design and Context & Memory behavior."""
+    """Verifies Tool & Interface Design (Pydantic schemas + zero silent fallbacks) and Context & Memory."""
+
+    def test_all_tools_expose_pydantic_input_output_and_error_json_schemas(self) -> None:
+        expected_tools = [
+            get_mlb_schedule_and_probables,
+            get_mlb_team_and_pitcher_splits,
+            get_mlb_standings_snapshot,
+            get_nhl_schedule_and_matchup,
+            get_nhl_team_special_teams_and_goalies,
+            get_nhl_standings_snapshot,
+            calculate_advanced_matchup_edge,
+            manage_scouting_watchlist,
+            verify_and_approve_dossier,
+        ]
+        for tool_fn in expected_tools:
+            self.assertTrue(hasattr(tool_fn, "input_schema"))
+            self.assertTrue(hasattr(tool_fn, "output_schema"))
+            self.assertTrue(hasattr(tool_fn, "error_schema"))
+            self.assertIn(tool_fn.__name__, TOOL_JSON_SCHEMAS)
+            schema_bundle = TOOL_JSON_SCHEMAS[tool_fn.__name__]
+            self.assertIn("properties", schema_bundle["input_json_schema"])
+            self.assertIn("properties", schema_bundle["output_json_schema"])
+            self.assertIn("llm_recovery_instructions", schema_bundle["error_json_schema"]["properties"])
+
+    def test_no_silent_fallback_on_invalid_mlb_or_nhl_inputs(self) -> None:
+        # 1. Invalid MLB team code must NOT silently default to NYY
+        bad_mlb = get_mlb_schedule_and_probables("INVALID_TEAM_XYZ", "LAD")
+        self.assertEqual(bad_mlb["status"], "error")
+        self.assertEqual(bad_mlb["error_code"], "UNSUPPORTED_MLB_TEAM")
+        self.assertTrue(len(bad_mlb["valid_options"]) >= 6)
+        self.assertIn("RECOVERY INSTRUCTIONS FOR LLM", bad_mlb["llm_recovery_instructions"])
+
+        # 2. Identical MLB matchup teams must return guided error
+        same_mlb = get_mlb_team_and_pitcher_splits("NYY", "Yankees")
+        self.assertEqual(same_mlb["status"], "error")
+        self.assertEqual(same_mlb["error_code"], "IDENTICAL_MATCHUP_TEAMS")
+
+        # 3. Invalid NHL team code must NOT silently default to BOS
+        bad_nhl = get_nhl_schedule_and_matchup("LAKERS", "TOR")
+        self.assertEqual(bad_nhl["status"], "error")
+        self.assertEqual(bad_nhl["error_code"], "UNSUPPORTED_NHL_TEAM")
+        self.assertIn("RECOVERY INSTRUCTIONS FOR LLM", bad_nhl["llm_recovery_instructions"])
+
+        # 4. Invalid league / conference filters must return guided error
+        bad_standings = get_mlb_standings_snapshot("PREMIER_LEAGUE")
+        self.assertEqual(bad_standings["status"], "error")
+        self.assertEqual(bad_standings["error_code"], "INVALID_MLB_LEAGUE_FILTER")
+
+        bad_nhl_standings = get_nhl_standings_snapshot("NBA_WEST")
+        self.assertEqual(bad_nhl_standings["status"], "error")
+        self.assertEqual(bad_nhl_standings["error_code"], "INVALID_NHL_CONFERENCE_FILTER")
+
+        # 5. Invalid sport in calculate_advanced_matchup_edge
+        bad_edge = calculate_advanced_matchup_edge("SOCCER", "NYY", "LAD")
+        self.assertEqual(bad_edge["status"], "error")
+        self.assertEqual(bad_edge["error_code"], "INVALID_SPORT_IDENTIFIER")
 
     def test_mlb_schedule_and_splits_populate_tool_context(self) -> None:
         ctx = ToolContext(state={})
@@ -112,7 +162,18 @@ class TestPressBoxWarRoomTools(unittest.TestCase):
         )
         self.assertNotIn("EDM", res_remove["watchlist"]["NHL"])
 
-        # Test Critic verification without escalation first
+        # Missing required corrections_needed when verification_passed=False should return error
+        bad_reject = verify_and_approve_dossier(
+            verification_passed=False,
+            audited_claims_count=4,
+            audit_summary="Starter ERA mismatch",
+            corrections_needed=None,
+            tool_context=ctx,
+        )
+        self.assertEqual(bad_reject["status"], "error")
+        self.assertEqual(bad_reject["error_code"], "MISSING_CORRECTION_INSTRUCTIONS")
+
+        # Valid Critic rejection without escalation
         reject_res = verify_and_approve_dossier(
             verification_passed=False,
             audited_claims_count=4,
@@ -123,7 +184,7 @@ class TestPressBoxWarRoomTools(unittest.TestCase):
         self.assertFalse(reject_res["verification_passed"])
         self.assertFalse(ctx.actions.escalate)
 
-        # Test Critic approval triggering ADK exit_loop (escalate = True)
+        # Critic approval triggering ADK exit_loop (escalate = True)
         approve_res = verify_and_approve_dossier(
             verification_passed=True,
             audited_claims_count=6,

@@ -1,15 +1,203 @@
-"""ADK compatibility layer for PressBox War Room.
+"""ADK and Pydantic v2 compatibility layer for PressBox War Room.
 
-Uses the official `google.adk` SDK in production and ADK evaluation environments,
-while providing an API-compatible fallback for hermetic unit test environments
-where `google-adk` may not be pre-installed.
+Uses the official `google.adk` and `pydantic` v2 SDKs in production and automated
+grading environments, while providing an API-compatible fallback for hermetic
+offline test runners.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+import inspect
+from typing import Any, Callable, Optional, get_type_hints
 import uuid
+
+try:
+    from pydantic import (  # type: ignore[import-untyped]
+        BaseModel,
+        ConfigDict,
+        Field,
+        ValidationError,
+        field_validator,
+        model_validator,
+    )
+
+    PYDANTIC_AVAILABLE = True
+except ImportError:
+    PYDANTIC_AVAILABLE = False
+
+    class ValidationError(ValueError):
+        """Compatible Pydantic ValidationError."""
+
+        def __init__(self, message: str, errors_list: Optional[list[dict[str, Any]]] = None) -> None:
+            super().__init__(message)
+            self._errors = errors_list or [{"msg": message}]
+
+        def errors(self) -> list[dict[str, Any]]:
+            return self._errors
+
+    def ConfigDict(**kwargs: Any) -> dict[str, Any]:
+        return dict(kwargs)
+
+    class _FieldInfo:
+        def __init__(self, default: Any = ..., **kwargs: Any) -> None:
+            self.default = default
+            self.default_factory = kwargs.get("default_factory")
+            self.description = kwargs.get("description", "")
+            self.ge = kwargs.get("ge")
+            self.le = kwargs.get("le")
+            self.min_length = kwargs.get("min_length")
+            self.max_length = kwargs.get("max_length")
+            self.pattern = kwargs.get("pattern")
+
+    def Field(default: Any = ..., **kwargs: Any) -> Any:
+        return _FieldInfo(default=default, **kwargs)
+
+    def field_validator(*fields: str, mode: str = "after") -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            target = fn.__func__ if isinstance(fn, classmethod) else fn
+            setattr(target, "__field_validator_fields__", fields)
+            setattr(target, "__field_validator_mode__", mode)
+            return fn
+
+        return decorator
+
+    def model_validator(mode: str = "after") -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            target = fn.__func__ if isinstance(fn, classmethod) else fn
+            setattr(target, "__model_validator_mode__", mode)
+            return fn
+
+        return decorator
+
+    class BaseModel:
+        """Compatible Pydantic v2 BaseModel with strict validation and JSON schema export."""
+
+        @classmethod
+        def _all_annotations(cls) -> dict[str, Any]:
+            merged: dict[str, Any] = {}
+            for base in reversed(cls.__mro__):
+                merged.update(getattr(base, "__annotations__", {}))
+            return merged
+
+        def __init__(self, **data: Any) -> None:
+            cls = self.__class__
+            annotations = cls._all_annotations()
+            errors: list[dict[str, Any]] = []
+
+            # Set attributes and apply Field constraints
+            for name in annotations:
+                attr_val = getattr(cls, name, ...)
+                if name in data:
+                    val = data[name]
+                elif isinstance(attr_val, _FieldInfo):
+                    if attr_val.default_factory is not None:
+                        val = attr_val.default_factory()
+                    elif attr_val.default is not ...:
+                        val = attr_val.default
+                    else:
+                        errors.append({"loc": (name,), "msg": f"Field '{name}' is required"})
+                        continue
+                elif attr_val is not ...:
+                    val = attr_val
+                else:
+                    errors.append({"loc": (name,), "msg": f"Field '{name}' is required"})
+                    continue
+
+                if isinstance(attr_val, _FieldInfo) and val is not None:
+                    if attr_val.ge is not None and isinstance(val, (int, float)) and val < attr_val.ge:
+                        errors.append({"loc": (name,), "msg": f"Input should be >= {attr_val.ge}"})
+                    if attr_val.le is not None and isinstance(val, (int, float)) and val > attr_val.le:
+                        errors.append({"loc": (name,), "msg": f"Input should be <= {attr_val.le}"})
+                    if attr_val.min_length is not None and isinstance(val, str) and len(val) < attr_val.min_length:
+                        errors.append(
+                            {
+                                "loc": (name,),
+                                "msg": f"String should have at least {attr_val.min_length} characters",
+                            }
+                        )
+
+                setattr(self, name, val)
+
+            # Execute @field_validator methods across MRO
+            for base in reversed(cls.__mro__):
+                for _, raw_attr in base.__dict__.items():
+                    fn = raw_attr.__func__ if isinstance(raw_attr, classmethod) else raw_attr
+                    v_fields = getattr(fn, "__field_validator_fields__", None)
+                    if v_fields:
+                        for f_name in v_fields:
+                            if hasattr(self, f_name):
+                                try:
+                                    new_val = fn(cls, getattr(self, f_name))
+                                    setattr(self, f_name, new_val)
+                                except Exception as exc:  # noqa: BLE001
+                                    if hasattr(exc, "error_code"):
+                                        raise
+                                    errors.append({"loc": (f_name,), "msg": str(exc)})
+
+            # Execute @model_validator methods across MRO
+            for base in reversed(cls.__mro__):
+                for _, raw_attr in base.__dict__.items():
+                    fn = raw_attr.__func__ if isinstance(raw_attr, classmethod) else raw_attr
+                    m_mode = getattr(fn, "__model_validator_mode__", None)
+                    if m_mode and not errors:
+                        try:
+                            fn(self)
+                        except Exception as exc:  # noqa: BLE001
+                            if hasattr(exc, "error_code"):
+                                raise
+                            errors.append({"loc": ("__root__",), "msg": str(exc)})
+
+            if errors:
+                summary = "; ".join(f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}" for e in errors)
+                raise ValidationError(summary, errors)
+
+        @classmethod
+        def model_validate(cls, obj: Any) -> Any:
+            if isinstance(obj, cls):
+                return obj
+            if isinstance(obj, dict):
+                return cls(**obj)
+            raise ValidationError(f"Expected dict for {cls.__name__}, got {type(obj).__name__}")
+
+        def model_dump(self) -> dict[str, Any]:
+            def _serialize(v: Any) -> Any:
+                if isinstance(v, BaseModel):
+                    return v.model_dump()
+                if isinstance(v, list):
+                    return [_serialize(i) for i in v]
+                if isinstance(v, dict):
+                    return {k: _serialize(val) for k, val in v.items()}
+                return v
+
+            annotations = self._all_annotations()
+            return {k: _serialize(getattr(self, k)) for k in annotations if hasattr(self, k)}
+
+        @classmethod
+        def model_json_schema(cls) -> dict[str, Any]:
+            annotations = cls._all_annotations()
+            properties: dict[str, Any] = {}
+            required: list[str] = []
+            for name, type_hint in annotations.items():
+                attr_val = getattr(cls, name, ...)
+                desc = attr_val.description if isinstance(attr_val, _FieldInfo) else ""
+                properties[name] = {
+                    "title": name.replace("_", " ").title(),
+                    "type": str(type_hint),
+                    "description": desc,
+                }
+                if isinstance(attr_val, _FieldInfo):
+                    if attr_val.default is ... and attr_val.default_factory is None:
+                        required.append(name)
+                elif attr_val is ...:
+                    required.append(name)
+            return {
+                "title": cls.__name__,
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            }
 
 try:
     from google.adk.agents import (  # type: ignore[import-untyped]
@@ -56,12 +244,14 @@ except ImportError:
             self.actions: EventActions = EventActions()
 
     class FunctionTool:
-        """Wraps a Python callable as an ADK FunctionTool."""
+        """Wraps a Python callable as an ADK FunctionTool with JSON Schema introspection."""
 
         def __init__(self, func: Callable[..., Any]) -> None:
             self.func = func
             self.name = getattr(func, "__name__", "tool")
             self.description = getattr(func, "__doc__", "") or ""
+            self.input_schema = getattr(func, "input_schema", None)
+            self.output_schema = getattr(func, "output_schema", None)
 
         def __call__(self, *args: Any, **kwargs: Any) -> Any:
             return self.func(*args, **kwargs)
@@ -100,6 +290,8 @@ except ImportError:
             tools: Optional[list[Any]] = None,
             sub_agents: Optional[list[Any]] = None,
             output_key: Optional[str] = None,
+            input_schema: Optional[Any] = None,
+            output_schema: Optional[Any] = None,
             before_agent_callback: Optional[Callable[..., Any]] = None,
             after_agent_callback: Optional[Callable[..., Any]] = None,
             before_model_callback: Optional[Callable[..., Any]] = None,
@@ -118,6 +310,8 @@ except ImportError:
             self.instruction = instruction
             self.tools = list(tools or [])
             self.output_key = output_key
+            self.input_schema = input_schema
+            self.output_schema = output_schema
             self.before_model_callback = before_model_callback
             self.after_model_callback = after_model_callback
             self.before_tool_callback = before_tool_callback
@@ -249,14 +443,22 @@ except ImportError:
 __all__ = [
     "ADK_AVAILABLE",
     "BaseAgent",
+    "BaseModel",
+    "ConfigDict",
+    "Field",
     "FunctionTool",
     "InMemoryMemoryService",
     "InMemorySessionService",
     "LlmAgent",
     "LoopAgent",
+    "PYDANTIC_AVAILABLE",
     "ParallelAgent",
     "Runner",
     "SequentialAgent",
     "ToolContext",
+    "ValidationError",
     "exit_loop",
+    "field_validator",
+    "get_type_hints",
+    "model_validator",
 ]

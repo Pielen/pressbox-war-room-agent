@@ -1,8 +1,9 @@
 """NHL Scouting & Statistical Tools backed by the Official NHL Web API (`api-web.nhle.com`).
 
-Provides live NHL API retrieval with a rich deterministic snapshot fallback for
-special teams (PP% / PK%), starting goalies (SV%, GAA, GSAx), and 5v5 expected
-goals metrics so unit tests and CI workflows run hermetically.
+Implements strict Pydantic v2 input/output schema validation (`NHLScheduleInput`,
+`NHLSpecialTeamsInput`, `NHLStandingsInput`, `NHLScheduleOutput`,
+`NHLSpecialTeamsOutput`, `NHLStandingsOutput`) and guided LLM error recovery
+(`ToolErrorResponse`) without any silent fallback to 'BOS'.
 """
 
 from __future__ import annotations
@@ -12,8 +13,22 @@ from typing import Any, Optional
 import urllib.error
 import urllib.request
 
-from pressbox_war_room._adk_compat import ToolContext
+from pressbox_war_room._adk_compat import ToolContext, ValidationError
 from pressbox_war_room.config import settings
+from pressbox_war_room.tools.schemas import (
+    NHLScheduleInput,
+    NHLScheduleOutput,
+    NHLSpecialTeamsInput,
+    NHLSpecialTeamsOutput,
+    NHLStandingsInput,
+    NHLStandingsOutput,
+    SUPPORTED_NHL_CONFERENCE_FILTERS,
+    SUPPORTED_NHL_TEAMS,
+    ToolInputValidationError,
+    build_validation_error_response,
+    resolve_nhl_team_code,
+    with_strict_tool_schema,
+)
 
 NHL_TEAM_DIRECTORY: dict[str, dict[str, Any]] = {
     "BOS": {
@@ -152,30 +167,10 @@ NHL_TEAM_DIRECTORY: dict[str, dict[str, Any]] = {
     },
 }
 
-_NHL_ALIASES: dict[str, str] = {
-    "BRUINS": "BOS",
-    "BOSTON BRUINS": "BOS",
-    "MAPLE LEAFS": "TOR",
-    "LEAFS": "TOR",
-    "TORONTO MAPLE LEAFS": "TOR",
-    "OILERS": "EDM",
-    "EDMONTON OILERS": "EDM",
-    "PANTHERS": "FLA",
-    "FLORIDA PANTHERS": "FLA",
-    "RANGERS": "NYR",
-    "NEW YORK RANGERS": "NYR",
-}
-
 
 def normalize_nhl_team_code(raw_team: str) -> str:
-    """Normalizes NHL team names or abbreviations into standard 3-letter codes."""
-    cleaned = raw_team.strip().upper()
-    if cleaned in NHL_TEAM_DIRECTORY:
-        return cleaned
-    for alias, code in _NHL_ALIASES.items():
-        if alias in cleaned:
-            return code
-    return cleaned[:3] if len(cleaned) >= 3 else "BOS"
+    """Strictly validates and resolves an NHL team name or code (raises ToolInputValidationError on unknown input)."""
+    return resolve_nhl_team_code(raw_team, field_name="team_code")
 
 
 def _try_live_nhl_schedule(team_code: str) -> Optional[dict[str, Any]]:
@@ -203,6 +198,7 @@ def _try_live_nhl_schedule(team_code: str) -> Optional[dict[str, Any]]:
     return None
 
 
+@with_strict_tool_schema(input_model=NHLScheduleInput, output_model=NHLScheduleOutput)
 def get_nhl_schedule_and_matchup(
     team_code: str,
     opponent_code: Optional[str] = None,
@@ -210,59 +206,74 @@ def get_nhl_schedule_and_matchup(
 ) -> dict[str, Any]:
     """Fetches NHL matchup schedule, starting goalies, and net special teams comparison.
 
+    Validates inputs via `NHLScheduleInput` (Pydantic BaseModel) and output via
+    `NHLScheduleOutput`. Rejects invalid team codes with guided LLM recovery
+    instructions instead of silently defaulting to 'BOS'.
+
     Args:
-        team_code: Primary NHL team abbreviation or name (e.g. 'BOS', 'TOR', 'EDM', 'FLA', 'NYR').
-        opponent_code: Optional opposing NHL team abbreviation (e.g. 'TOR', 'FLA').
+        team_code: Primary NHL team abbreviation or name ('BOS', 'TOR', 'EDM', 'FLA', 'NYR').
+        opponent_code: Optional opposing NHL team abbreviation ('BOS', 'TOR', 'EDM', 'FLA', 'NYR').
         tool_context: Optional ADK ToolContext used to store NHL scouting intel in session state.
 
     Returns:
-        dict[str, Any]: Structured NHL matchup preview with goalie and special teams headlines.
+        dict[str, Any]: Validated `NHLScheduleOutput` dict or `ToolErrorResponse` dict.
     """
-    primary = normalize_nhl_team_code(team_code)
-    opponent = (
-        normalize_nhl_team_code(opponent_code)
-        if opponent_code
-        else ("TOR" if primary != "TOR" else "BOS")
-    )
+    try:
+        validated_in = NHLScheduleInput.model_validate(
+            {"team_code": team_code, "opponent_code": opponent_code}
+        )
+    except (ToolInputValidationError, ValidationError) as exc:
+        return build_validation_error_response(
+            tool_name="get_nhl_schedule_and_matchup",
+            exc=exc,
+            raw_inputs={"team_code": team_code, "opponent_code": opponent_code},
+            default_valid_options=list(SUPPORTED_NHL_TEAMS.keys()),
+        )
 
-    primary_info = NHL_TEAM_DIRECTORY.get(primary, NHL_TEAM_DIRECTORY["BOS"])
-    opponent_info = NHL_TEAM_DIRECTORY.get(opponent, NHL_TEAM_DIRECTORY["TOR"])
+    primary = validated_in.team_code
+    opponent = validated_in.opponent_code or ("TOR" if primary != "TOR" else "BOS")
+
+    primary_info = NHL_TEAM_DIRECTORY[primary]
+    opponent_info = NHL_TEAM_DIRECTORY[opponent]
     live_game = _try_live_nhl_schedule(primary)
 
-    result = {
-        "status": "success",
-        "sport": "NHL",
-        "matchup": f"{opponent_info['name']} ({opponent}) at {primary_info['name']} ({primary})",
-        "data_source": live_game["source"] if live_game else "verified_nhl_stats_snapshot",
-        "home_team": {
-            "code": primary,
-            "name": primary_info["name"],
-            "record": f"{primary_info['wins']}-{primary_info['losses']}-{primary_info['ot_losses']}",
-            "points": primary_info["points"],
-            "starting_goalie": primary_info["starting_goalie"],
-            "special_teams": {
-                "pp_pct": primary_info["pp_pct"],
-                "pk_pct": primary_info["pk_pct"],
-                "net_special_teams_index": round(
-                    primary_info["pp_pct"] + primary_info["pk_pct"], 1
-                ),
+    validated_out = NHLScheduleOutput.model_validate(
+        {
+            "status": "success",
+            "sport": "NHL",
+            "matchup": f"{opponent_info['name']} ({opponent}) at {primary_info['name']} ({primary})",
+            "data_source": live_game["source"] if live_game else "verified_nhl_stats_snapshot",
+            "home_team": {
+                "code": primary,
+                "name": primary_info["name"],
+                "record": f"{primary_info['wins']}-{primary_info['losses']}-{primary_info['ot_losses']}",
+                "points": primary_info["points"],
+                "starting_goalie": primary_info["starting_goalie"],
+                "special_teams": {
+                    "pp_pct": primary_info["pp_pct"],
+                    "pk_pct": primary_info["pk_pct"],
+                    "net_special_teams_index": round(
+                        primary_info["pp_pct"] + primary_info["pk_pct"], 1
+                    ),
+                },
             },
-        },
-        "away_team": {
-            "code": opponent,
-            "name": opponent_info["name"],
-            "record": f"{opponent_info['wins']}-{opponent_info['losses']}-{opponent_info['ot_losses']}",
-            "points": opponent_info["points"],
-            "starting_goalie": opponent_info["starting_goalie"],
-            "special_teams": {
-                "pp_pct": opponent_info["pp_pct"],
-                "pk_pct": opponent_info["pk_pct"],
-                "net_special_teams_index": round(
-                    opponent_info["pp_pct"] + opponent_info["pk_pct"], 1
-                ),
+            "away_team": {
+                "code": opponent,
+                "name": opponent_info["name"],
+                "record": f"{opponent_info['wins']}-{opponent_info['losses']}-{opponent_info['ot_losses']}",
+                "points": opponent_info["points"],
+                "starting_goalie": opponent_info["starting_goalie"],
+                "special_teams": {
+                    "pp_pct": opponent_info["pp_pct"],
+                    "pk_pct": opponent_info["pk_pct"],
+                    "net_special_teams_index": round(
+                        opponent_info["pp_pct"] + opponent_info["pk_pct"], 1
+                    ),
+                },
             },
-        },
-    }
+        }
+    )
+    result = validated_out.model_dump()
 
     if tool_context is not None:
         intel_store = tool_context.state.setdefault("temp:nhl_intel", {})
@@ -272,6 +283,7 @@ def get_nhl_schedule_and_matchup(
     return result
 
 
+@with_strict_tool_schema(input_model=NHLSpecialTeamsInput, output_model=NHLSpecialTeamsOutput)
 def get_nhl_team_special_teams_and_goalies(
     team_code: str,
     opponent_code: Optional[str] = None,
@@ -279,22 +291,37 @@ def get_nhl_team_special_teams_and_goalies(
 ) -> dict[str, Any]:
     """Retrieves NHL team Power Play %, Penalty Kill %, 5v5 xGF%, goalie GSAx, and top skaters.
 
+    Validates inputs against `NHLSpecialTeamsInput` (Pydantic BaseModel) and output
+    against `NHLSpecialTeamsOutput`. Never silently falls back on invalid inputs.
+
     Args:
-        team_code: NHL team code or name (e.g. 'BOS', 'TOR', 'EDM', 'FLA', 'NYR').
+        team_code: NHL team code or name ('BOS', 'TOR', 'EDM', 'FLA', 'NYR').
         opponent_code: Optional opponent code for direct goalie & special teams comparison.
         tool_context: Optional ADK ToolContext to persist NHL stats in session state.
 
     Returns:
-        dict[str, Any]: Detailed special teams, 5v5 possession, goalie metrics, and top scorers.
+        dict[str, Any]: Validated `NHLSpecialTeamsOutput` dict or `ToolErrorResponse` dict.
     """
-    primary = normalize_nhl_team_code(team_code)
-    primary_info = NHL_TEAM_DIRECTORY.get(primary, NHL_TEAM_DIRECTORY["BOS"])
+    try:
+        validated_in = NHLSpecialTeamsInput.model_validate(
+            {"team_code": team_code, "opponent_code": opponent_code}
+        )
+    except (ToolInputValidationError, ValidationError) as exc:
+        return build_validation_error_response(
+            tool_name="get_nhl_team_special_teams_and_goalies",
+            exc=exc,
+            raw_inputs={"team_code": team_code, "opponent_code": opponent_code},
+            default_valid_options=list(SUPPORTED_NHL_TEAMS.keys()),
+        )
+
+    primary = validated_in.team_code
+    primary_info = NHL_TEAM_DIRECTORY[primary]
     net_special_teams = round(primary_info["pp_pct"] + primary_info["pk_pct"], 1)
 
     opponent_data = None
-    if opponent_code:
-        opp_code = normalize_nhl_team_code(opponent_code)
-        opp_info = NHL_TEAM_DIRECTORY.get(opp_code, NHL_TEAM_DIRECTORY["TOR"])
+    if validated_in.opponent_code:
+        opp_code = validated_in.opponent_code
+        opp_info = NHL_TEAM_DIRECTORY[opp_code]
         opponent_data = {
             "code": opp_code,
             "name": opp_info["name"],
@@ -311,31 +338,34 @@ def get_nhl_team_special_teams_and_goalies(
             "top_skaters": opp_info["top_skaters"],
         }
 
-    result = {
-        "status": "success",
-        "sport": "NHL",
-        "team_code": primary,
-        "team_name": primary_info["name"],
-        "division": primary_info["division"],
-        "record": f"{primary_info['wins']}-{primary_info['losses']}-{primary_info['ot_losses']}",
-        "points": primary_info["points"],
-        "goals_for": primary_info["goals_for"],
-        "goals_against": primary_info["goals_against"],
-        "goal_differential": primary_info["goals_for"] - primary_info["goals_against"],
-        "special_teams": {
-            "pp_pct": primary_info["pp_pct"],
-            "pk_pct": primary_info["pk_pct"],
-            "net_special_teams_index": net_special_teams,
-            "tier": "Elite (>105%)" if net_special_teams >= 105.0 else "Contender (100-104.9%)",
-        },
-        "even_strength_5v5": {
-            "xgf_pct": primary_info["xgf_pct_5v5"],
-        },
-        "starting_goalie": primary_info["starting_goalie"],
-        "top_skaters": primary_info["top_skaters"],
-        "last_10": primary_info["last_10"],
-        "opponent_comparison": opponent_data,
-    }
+    validated_out = NHLSpecialTeamsOutput.model_validate(
+        {
+            "status": "success",
+            "sport": "NHL",
+            "team_code": primary,
+            "team_name": primary_info["name"],
+            "division": primary_info["division"],
+            "record": f"{primary_info['wins']}-{primary_info['losses']}-{primary_info['ot_losses']}",
+            "points": primary_info["points"],
+            "goals_for": primary_info["goals_for"],
+            "goals_against": primary_info["goals_against"],
+            "goal_differential": primary_info["goals_for"] - primary_info["goals_against"],
+            "special_teams": {
+                "pp_pct": primary_info["pp_pct"],
+                "pk_pct": primary_info["pk_pct"],
+                "net_special_teams_index": net_special_teams,
+                "tier": "Elite (>105%)" if net_special_teams >= 105.0 else "Contender (100-104.9%)",
+            },
+            "even_strength_5v5": {
+                "xgf_pct": primary_info["xgf_pct_5v5"],
+            },
+            "starting_goalie": primary_info["starting_goalie"],
+            "top_skaters": primary_info["top_skaters"],
+            "last_10": primary_info["last_10"],
+            "opponent_comparison": opponent_data,
+        }
+    )
+    result = validated_out.model_dump()
 
     if tool_context is not None:
         intel_store = tool_context.state.setdefault("temp:nhl_intel", {})
@@ -345,20 +375,36 @@ def get_nhl_team_special_teams_and_goalies(
     return result
 
 
+@with_strict_tool_schema(input_model=NHLStandingsInput, output_model=NHLStandingsOutput)
 def get_nhl_standings_snapshot(
     conference_filter: str = "ALL",
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
     """Returns ranked NHL standings with points, goal differential, and special teams index.
 
+    Validates `conference_filter` via `NHLStandingsInput` (Pydantic BaseModel) and returns
+    `ToolErrorResponse` with recovery instructions if an invalid filter is passed.
+
     Args:
-        conference_filter: Filter by 'EASTERN', 'WESTERN', or 'ALL' (default 'ALL').
+        conference_filter: Filter by 'ALL', 'EASTERN', 'WESTERN', 'ATLANTIC', 'METROPOLITAN', or 'PACIFIC'.
         tool_context: Optional ADK ToolContext.
 
     Returns:
-        dict[str, Any]: Ranked NHL standings snapshot.
+        dict[str, Any]: Validated `NHLStandingsOutput` dict or `ToolErrorResponse` dict.
     """
-    normalized_filter = conference_filter.strip().upper()
+    try:
+        validated_in = NHLStandingsInput.model_validate(
+            {"conference_filter": conference_filter}
+        )
+    except (ToolInputValidationError, ValidationError) as exc:
+        return build_validation_error_response(
+            tool_name="get_nhl_standings_snapshot",
+            exc=exc,
+            raw_inputs={"conference_filter": conference_filter},
+            default_valid_options=sorted(SUPPORTED_NHL_CONFERENCE_FILTERS),
+        )
+
+    normalized_filter = validated_in.conference_filter
     teams = []
     for code, info in NHL_TEAM_DIRECTORY.items():
         if normalized_filter in ("ALL", info["conference"].upper(), info["division"].upper()):
@@ -377,12 +423,15 @@ def get_nhl_standings_snapshot(
             )
 
     teams.sort(key=lambda item: item["points"], reverse=True)
-    result = {
-        "status": "success",
-        "sport": "NHL",
-        "conference_filter": normalized_filter,
-        "standings": teams,
-    }
+    validated_out = NHLStandingsOutput.model_validate(
+        {
+            "status": "success",
+            "sport": "NHL",
+            "conference_filter": normalized_filter,
+            "standings": teams,
+        }
+    )
+    result = validated_out.model_dump()
 
     if tool_context is not None:
         tool_context.state["temp:nhl_standings"] = result
