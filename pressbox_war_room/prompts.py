@@ -70,4 +70,7 @@ How to route and fulfill requests:
    - Use the MLB tools (`get_mlb_schedule_and_probables`, `get_mlb_team_and_pitcher_splits`, `get_mlb_standings_snapshot`), NHL tools (`get_nhl_schedule_and_matchup`, `get_nhl_team_special_teams_and_goalies`, `get_nhl_standings_snapshot`), and `calculate_advanced_matchup_edge`, OR delegate to `MLBScoutAgent` / `NHLScoutAgent`.
 3. **Comprehensive Multi-Sport or Full War Room Dossiers**:
    - Delegate to `FullWarRoomPipeline` (which runs `ScoutingIntelGatherer` in parallel followed by `ReportRefinementLoop` with `TacticalSynthesizerAgent` and `StatVerifierCriticAgent`) to deliver a fact-checked scouting dossier.
+4. **Mandatory Human-in-the-Loop (HITL) Verification for High-Stakes Actions**:
+   - High-stakes actions—including external dossier publication (`publish_official_war_room_dossier`), clearing the entire scouting watchlist (`manage_scouting_watchlist` with `action='clear'`), or issuing roster/betting recommendations—are protected by an explicit HITL confirmation gate (`enforce_hitl_verification_gate` + `tool_context.request_confirmation`).
+   - Always call `request_human_approval_for_high_stakes_action` to obtain a `HITL-XXXXXXXX` ticket ID and pause for human sign-off (`approve_or_reject_high_stakes_action`) before executing any high-stakes or irreversible operation.
 """

@@ -201,6 +201,66 @@ class TestAgentOrchestrationAndObservability(unittest.TestCase):
         self.assertIsNotNone(saved_compaction)
         self.assertGreaterEqual(saved_compaction["compacted_turn_count"], 1)
 
+    def test_human_in_the_loop_verification_gate_for_high_stakes_actions(self) -> None:
+        from pressbox_war_room.hitl import (
+            approve_or_reject_high_stakes_action,
+            publish_official_war_room_dossier,
+        )
+
+        ctx = ToolContext()
+
+        # 1. Attempting a high-stakes publication without human approval is intercepted by before_tool_callback
+        unapproved_args = {
+            "distribution_channel": "front_office_and_broadcast_desk",
+            "matchup_title": "AL East Matchup Tactical Briefing: NYY vs BOS",
+            "dossier_markdown": (
+                "# Executive Matchup Summary\n"
+                "Pythagorean expectancy favors NYY (.581) vs BOS (.512) with Log5 edge 56.8%."
+            ),
+            "human_approval_token": None,
+        }
+        gate_response = before_tool_callback(
+            publish_official_war_room_dossier, unapproved_args, ctx
+        )
+        self.assertIsNotNone(gate_response)
+        self.assertEqual(gate_response["status"], "pending_human_approval")
+        ticket_id = gate_response["hitl_ticket_id"]
+        self.assertTrue(ticket_id.startswith("HITL-"))
+
+        # 2. Attempting to clear the entire scouting watchlist without human confirmation is also intercepted
+        clear_gate = before_tool_callback(
+            "manage_scouting_watchlist",
+            {"action": "clear", "sport": "MLB"},
+            ctx,
+        )
+        self.assertIsNotNone(clear_gate)
+        self.assertEqual(clear_gate["status"], "pending_human_approval")
+
+        # 3. Human supervisor approves the HITL ticket
+        approval_res = approve_or_reject_high_stakes_action(
+            hitl_ticket_id=ticket_id,
+            decision="APPROVE",
+            reviewer_id="Senior Analytics Director",
+            reviewer_notes="Confirmed Cole vs Bello ERA/WHIP figures and Log5 math.",
+            tool_context=ctx,
+        )
+        self.assertEqual(approval_res["status"], "approved_by_human")
+        self.assertIn(ticket_id, ctx.state["hitl:approved_tokens"])
+
+        # 4. Re-running with the verified human_approval_token passes both before_tool_callback and the tool
+        approved_args = dict(unapproved_args, human_approval_token=ticket_id)
+        second_gate = before_tool_callback(
+            publish_official_war_room_dossier, approved_args, ctx
+        )
+        self.assertIsNone(second_gate)
+
+        pub_res = publish_official_war_room_dossier(
+            **approved_args,
+            tool_context=ctx,
+        )
+        self.assertEqual(pub_res["status"], "published_with_human_signoff")
+        self.assertEqual(pub_res["hitl_ticket_id"], ticket_id)
+
 
 if __name__ == "__main__":
     unittest.main()

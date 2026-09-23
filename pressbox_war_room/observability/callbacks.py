@@ -117,6 +117,19 @@ def describe_tool_intent(tool_name: str, sanitized_args: dict[str, Any]) -> str:
             f"Audit {sanitized_args.get('audited_claims_count')} statistical claims in dossier draft "
             f"(verification_passed={sanitized_args.get('verification_passed')})"
         ),
+        "request_human_approval_for_high_stakes_action": (
+            f"Create Human-in-the-Loop (HITL) confirmation gate for action_type="
+            f"'{sanitized_args.get('action_type')}' target='{sanitized_args.get('target_entity')}'"
+        ),
+        "approve_or_reject_high_stakes_action": (
+            f"Record human supervisor decision='{sanitized_args.get('decision')}' for "
+            f"approval_id='{sanitized_args.get('approval_id')}'"
+        ),
+        "publish_official_war_room_dossier": (
+            f"Execute high-stakes official publication to channel="
+            f"'{sanitized_args.get('distribution_channel')}' with human_approval_token="
+            f"'{sanitized_args.get('human_approval_token')}'"
+        ),
     }
     return intent_map.get(
         tool_name,
@@ -466,7 +479,9 @@ def after_model_callback(
 def before_tool_callback(
     tool: Any, args: dict[str, Any], tool_context: Any
 ) -> Optional[dict[str, Any]]:
-    """ADK before_tool_callback: scrubs PII from tool arguments and logs pre-execution tool intent."""
+    """ADK before_tool_callback: scrubs PII, logs pre-execution intent, and enforces HITL gates for high-stakes actions."""
+    from pressbox_war_room.hitl import enforce_hitl_verification_gate
+
     tool_name = getattr(tool, "name", getattr(tool, "__name__", str(tool)))
     state = _extract_state(tool_context)
 
@@ -491,6 +506,22 @@ def before_tool_callback(
         raw_inputs=raw_filtered_args,
         state=state,
     )
+
+    # Enforce Human-in-the-Loop (HITL) verification gate for high-stakes actions
+    hitl_gate_response = enforce_hitl_verification_gate(tool_name, args or {}, tool_context)
+    if hitl_gate_response is not None:
+        telemetry_collector.stop_timer(
+            key=f"tool:{tool_name}",
+            span_type="hitl_verification_gate",
+            name=tool_name,
+            status="PAUSED_FOR_HUMAN_APPROVAL",
+            attributes={
+                "approval_id": hitl_gate_response.get("approval_id"),
+                "high_stakes_reason": hitl_gate_response.get("high_stakes_reason"),
+            },
+        )
+        return hitl_gate_response
+
     return None
 
 

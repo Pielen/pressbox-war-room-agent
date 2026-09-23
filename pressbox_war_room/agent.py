@@ -72,6 +72,12 @@ from pressbox_war_room.tools.nhl_tools import (
     get_nhl_standings_snapshot,
     get_nhl_team_special_teams_and_goalies,
 )
+from pressbox_war_room.hitl import (
+    approve_or_reject_high_stakes_action,
+    enforce_hitl_verification_gate,
+    publish_official_war_room_dossier,
+    request_human_approval_for_high_stakes_action,
+)
 
 root_agent = LlmAgent(
     name="WarRoomCoordinator",
@@ -80,7 +86,8 @@ root_agent = LlmAgent(
         "Root coordinator for the PressBox War Room multi-agent MLB & NHL scouting "
         "and tactical matchup analytics system. Routes queries to specialist MLB/NHL "
         "scout sub-agents, manages persistent scouting watchlists in SQLite & session memory "
-        "via non-blocking background tasks, compacts long conversation history, and "
+        "via non-blocking background tasks, compacts long conversation history, enforces "
+        "Human-in-the-Loop (HITL) verification hooks for high-stakes actions, and "
         "orchestrates the parallel-gather + critic-verified dossier pipeline."
     ),
     instruction=WAR_ROOM_COORDINATOR_INSTRUCTION,
@@ -93,6 +100,9 @@ root_agent = LlmAgent(
         get_nhl_team_special_teams_and_goalies,
         get_nhl_standings_snapshot,
         calculate_advanced_matchup_edge,
+        request_human_approval_for_high_stakes_action,
+        approve_or_reject_high_stakes_action,
+        publish_official_war_room_dossier,
     ],
     sub_agents=[
         mlb_scout_agent,
